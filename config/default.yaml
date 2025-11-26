@@ -1,0 +1,75 @@
+{
+  "seed": 42,
+  "simulation_days": 100,
+  "risk_threshold": 0.8,
+  "num_mules": 3,
+  "num_residents": 7,
+  "num_employees": 6,
+  "num_regulators": 2,
+  "risk_model": {
+    "laundering_amount_threshold": 80000,
+    "high_risk_amount": 100000
+  },
+  "role_descriptions": {
+    "boss": "Directs laundering strategy and communicates indirectly with the mastermind.",
+    "mastermind": "Receives criminal funds and parcels them to collaborators.",
+    "courier": "Delivers parcels from mastermind to owners and mules.",
+    "business_owner": "Receives funds and disguises them as revenue.",
+    "accountant": "Designs laundering typologies and forges invoices.",
+    "employee": "Performs regular business operations.",
+    "mule": "Receives and redistributes small payments.",
+    "resident": "Performs normal salary and spending patterns.",
+    "bank_teller": "Handles deposits and flags suspicious amounts.",
+    "back_office": "Approves large transfers and maintains data.",
+    "regulator": "Monitors risk scores and files SARs."
+  },
+  "daily_schedules": {
+    "mastermind_transfers": {
+      "times": ["10:00", "16:00"],
+      "max_amount": 500000,
+      "parcel_range": [10000, 50000]
+    },
+    "business_intake": {
+      "restaurant": {
+        "days": ["Tuesday", "Thursday"],
+        "amount": 30000
+      },
+      "car_shop": {
+        "days": ["Monday", "Wednesday"],
+        "amount": 40000
+      },
+      "e_shop": {
+        "days": ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"],
+        "amount": 20000
+      }
+    },
+    "mule_payments": {
+      "days": ["Monday", "Wednesday", "Friday"],
+      "payment_amount": 2000,
+      "payment_count": 5
+    },
+    "salary_days": [1, 15]
+  },
+  "knowledge": {
+    "model_path": "facebook/dpr-ctx_encoder-single-nq-base",
+    "device": null,
+    "documents": [
+      {
+        "title": "Structuring case",
+        "text": "A customer split 500k into 10k deposits across branches to avoid reporting."
+      },
+      {
+        "title": "Circular trading",
+        "text": "Layering via multiple shell companies invoicing each other without real goods."
+      },
+      {
+        "title": "SAR threshold",
+        "text": "Deposits above 100k in one day often trigger SAR filings in China."
+      },
+      {
+        "title": "Fan-out typology",
+        "text": "Funds are split to many recipients before being consolidated again."
+      }
+    ]
+  }
+}
