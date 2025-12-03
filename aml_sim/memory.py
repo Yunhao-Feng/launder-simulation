@@ -38,7 +38,7 @@ class CommonSenseMemory:
                 "Inconsistent tax filings versus bank inflows indicate suspicious integration.",
             ],
         }
-
+    
     def retrieve(self, knowledge_types: Optional[Sequence[str]] = None) -> str:
         commonsense_prompt = "\n"
         selected_keys = knowledge_types or self.common_sense.keys()

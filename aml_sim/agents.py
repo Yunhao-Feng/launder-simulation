@@ -3,10 +3,12 @@ from __future__ import annotations
 import dataclasses
 import importlib.util
 import os
-from typing import List
-
+from typing import List, Optional
 
 from openai import OpenAI
+
+
+
 
 
 from .knowledge import KnowledgeBase
@@ -26,7 +28,7 @@ class ReasoningEngine:
         self.api_key = os.getenv("OPENAI_API_KEY", "")
         self.api_base = os.getenv("OPENAI_API_BASE") or os.getenv("OPENAI_BASE_URL")
 
-    def _llm_reason(self, prompt: str):
+    def _llm_reason(self, prompt: str) -> Optional[str]:
         if not self.api_key or OpenAI is None:
             return None
         client = OpenAI(api_key=self.api_key, base_url=self.api_base)
@@ -100,68 +102,101 @@ class Agent:
         knowledge_block = "\n".join(kb_texts) or "(no retrieved cases)"
         return self.reasoner.run(self.role, query, memory_block, knowledge_block, commonsense)
 
-    def decide_next_action(self, query: str) -> str:
-        return self.retrieve_context(query)
+    def decide_next_action(self, query: str, observation: str | None = None) -> str:
+        decision = self.retrieve_context(query)
+        memo_line = observation or query
+        self.update_memory(f"{memo_line} | decision: {decision}")
+        return decision
+
+
+class BossAgent(Agent):
+    def plan_strategy(self) -> str:
+        return self.decide_next_action("Coordinate laundering parcels and minimize visibility")
+
+
+class CourierAgent(Agent):
+    def move_parcels(self, parcel_count: int, total_value: float) -> str:
+        return self.decide_next_action(
+            "Deliver parcels from mastermind to businesses and mules",
+            observation=f"Moved {parcel_count} parcels totaling {total_value:.2f}",
+        )
 
 
 class BusinessOwnerAgent(Agent):
     business_type: str
 
     def receive_parcel(self, amount: float) -> str:
-        note = f"Received parcel of {amount:.2f} for business inflow."
-        self.update_memory(note)
-        return note
+        return self.decide_next_action(
+            "Handle illicit inflow while masking as revenue",
+            observation=f"Received parcel of {amount:.2f} for business inflow",
+        )
 
     def integrate_funds(self, amount: float) -> str:
-        note = f"Integrating {amount:.2f} via payroll and suppliers."
-        self.update_memory(note)
-        return note
+        return self.decide_next_action(
+            "Blend funds through payroll and supplier payments",
+            observation=f"Integrating {amount:.2f} via payroll and suppliers",
+        )
 
 
 class AccountantAgent(Agent):
     def design_typology(self, typology: str) -> str:
-        note = f"Constructed {typology} layering path."
-        self.update_memory(note)
-        return note
+        return self.decide_next_action(
+            "Construct layering typology",
+            observation=f"Constructed {typology} layering path",
+        )
+
+
+class EmployeeAgent(Agent):
+    def perform_shift(self, business: str) -> str:
+        return self.decide_next_action(
+            "Serve customers and record legitimate revenue",
+            observation=f"Completed shift at {business}",
+        )
 
 
 class MuleAgent(Agent):
     def redistribute(self, amounts: List[float]) -> str:
-        note = f"Redistributing {len(amounts)} incoming parcels totaling {sum(amounts):.2f}."
-        self.update_memory(note)
-        return note
+        return self.decide_next_action(
+            "Redistribute parcels without detection",
+            observation=f"Redistributing {len(amounts)} parcels totaling {sum(amounts):.2f}",
+        )
 
 
 class MastermindAgent(Agent):
     def parcel_funds(self, parcels: List[float]) -> str:
-        note = f"Split incoming funds into parcels: {', '.join([str(int(p)) for p in parcels])}."
-        self.update_memory(note)
-        return note
+        return self.decide_next_action(
+            "Split bulk funds into parcels for placement",
+            observation=f"Split incoming funds into parcels: {', '.join([str(int(p)) for p in parcels])}",
+        )
 
 
 class RegulatorAgent(Agent):
     def open_investigation(self, tx_id: int, score: float) -> str:
-        note = f"Opened SAR for transaction {tx_id} with risk {score:.2f}."
-        self.update_memory(note)
-        return note
+        return self.decide_next_action(
+            "Investigate high-risk transaction",
+            observation=f"Opened SAR for transaction {tx_id} with risk {score:.2f}",
+        )
 
 
 class BankTellerAgent(Agent):
     def flag_deposit(self, amount: float) -> str:
-        note = f"Filed SAR for large deposit {amount:.2f}."
-        self.update_memory(note)
-        return note
+        return self.decide_next_action(
+            "Review cash deposit for SAR threshold",
+            observation=f"Filed SAR for large deposit {amount:.2f}",
+        )
 
 
 class BackOfficeAgent(Agent):
     def approve_transfer(self, amount: float) -> str:
-        note = f"Approved large transfer of {amount:.2f}."
-        self.update_memory(note)
-        return note
+        return self.decide_next_action(
+            "Approve large outbound transfer",
+            observation=f"Approved large transfer of {amount:.2f}",
+        )
 
 
 class ResidentAgent(Agent):
     def normal_activity(self, amount: float) -> str:
-        note = f"Completed normal spend of {amount:.2f}."
-        self.update_memory(note)
-        return note
+        return self.decide_next_action(
+            "Perform normal spending or savings",
+            observation=f"Completed normal spend of {amount:.2f}",
+        )

@@ -8,7 +8,10 @@ from .agents import (
     AccountantAgent,
     BackOfficeAgent,
     BankTellerAgent,
+    BossAgent,
     BusinessOwnerAgent,
+    CourierAgent,
+    EmployeeAgent,
     MastermindAgent,
     MuleAgent,
     RegulatorAgent,
@@ -42,9 +45,12 @@ class Simulation:
         self.event_recorder = EventRecorder()
         self.risk_model = RiskModel(config.risk_threshold, config.risk_model)
 
+        self.boss: BossAgent = self._create_boss()
         self.mastermind: MastermindAgent = self._create_mastermind()
+        self.courier: CourierAgent = self._create_courier()
         self.business_owners: List[BusinessOwnerAgent] = self._create_business_owners()
         self.accountants: List[AccountantAgent] = self._create_accountants()
+        self.employees: List[EmployeeAgent] = self._create_employees()
         self.mules: List[MuleAgent] = self._create_mules()
         self.residents: List[ResidentAgent] = self._create_residents()
         self.bank_tellers: List[BankTellerAgent] = self._create_tellers()
@@ -53,13 +59,24 @@ class Simulation:
 
         self.currencies = "CNY"
 
+    def _memory(self, max_items: int = 500) -> AgentMemory:
+        return AgentMemory(max_items=max_items, embedder=self.embedder)
+
     def _base_agent(self, idx: int, role: str):
         account = f"{role}-{idx}-acct"
-        return AgentMemory(max_items=500, embedder=self.embedder), [account]
+        return self._memory(), [account]
+
+    def _create_boss(self) -> BossAgent:
+        mem, accounts = self._base_agent(1, "boss")
+        return BossAgent("boss-1", "Money Laundering Boss", accounts, mem, self.knowledge_base)
 
     def _create_mastermind(self) -> MastermindAgent:
         mem, accounts = self._base_agent(1, "mastermind")
         return MastermindAgent("mastermind-1", "Money Shop Mastermind", accounts, mem, self.knowledge_base)
+
+    def _create_courier(self) -> CourierAgent:
+        mem, accounts = self._base_agent(1, "courier")
+        return CourierAgent("courier-1", "Courier", accounts, mem, self.knowledge_base)
 
     def _create_business_owners(self) -> List[BusinessOwnerAgent]:
         owners = []
@@ -92,11 +109,18 @@ class Simulation:
             )
         return accountants
 
+    def _create_employees(self) -> List[EmployeeAgent]:
+        employees: List[EmployeeAgent] = []
+        for idx in range(1, self.config.num_employees + 1):
+            mem, accounts = self._base_agent(idx, "employee")
+            employees.append(EmployeeAgent(f"employee-{idx}", "Employee", accounts, mem, self.knowledge_base))
+        return employees
+
     def _create_mules(self) -> List[MuleAgent]:
         mules = []
         for idx in range(1, self.config.num_mules + 1):
             accounts = [f"mule-{idx}-acct-1", f"mule-{idx}-acct-2"]
-            mem = AgentMemory(max_items=300)
+            mem = self._memory(max_items=300)
             mules.append(MuleAgent(f"mule-{idx}", "Money Mule", accounts, mem, self.knowledge_base))
         return mules
 
@@ -124,16 +148,24 @@ class Simulation:
             mem, accounts = self._base_agent(idx, "regulator")
             regulators.append(RegulatorAgent(f"regulator-{idx}", "Regulator", accounts, mem, self.knowledge_base))
         return regulators
-
+    
     def run(self) -> None:
         start_date = datetime(2024, 1, 1)
         for day_idx in range(self.config.simulation_days):
             current_date = start_date + timedelta(days=day_idx)
             self._run_day(current_date)
-
+    
     def _run_day(self, current_date: datetime) -> None:
         weekday = current_date.strftime("%A")
         schedules = self.config.daily_schedules
+
+        # Strategy and planning by boss and accountants
+        boss_plan = self.boss.plan_strategy()
+        self.event_recorder.record_event(self.boss.id, self.boss.role, "plan", boss_plan)
+        for accountant in self.accountants:
+            typology = random.choice(ACCOUNTING_TYPOLOGIES)
+            desc = accountant.design_typology(typology)
+            self.event_recorder.record_event(accountant.id, accountant.role, "typology", desc)
 
         # Placement stage
         transfer_cfg = schedules.get("mastermind_transfers", {})
@@ -148,15 +180,29 @@ class Simulation:
                 size = min(size, remaining)
                 parcels.append(size)
                 remaining -= size
-            self.mastermind.parcel_funds(parcels)
-            self.event_recorder.record_event(self.mastermind.id, self.mastermind.role, "parcel", f"Received {incoming} and split into {len(parcels)} parcels")
+            mm_desc = self.mastermind.parcel_funds(parcels)
+            self.event_recorder.record_event(self.mastermind.id, self.mastermind.role, "parcel", mm_desc)
+
+            courier_desc = self.courier.move_parcels(len(parcels), sum(parcels))
+            self.event_recorder.record_event(self.courier.id, self.courier.role, "pickup", courier_desc, target_id=self.mastermind.id)
+
+            courier_tx = self.event_recorder.record_transaction(
+                sender_account=self.mastermind.accounts[0],
+                receiver_account=self.courier.accounts[0],
+                amount=sum(parcels),
+                currency=self.currencies,
+                tx_type="placement",
+                is_money_laundering=True,
+                ml_typology="placement",
+            )
+            self._evaluate_risk(courier_tx)
 
             # deliver parcels to business owners and mules
             receivers = self.business_owners + self.mules
             random.shuffle(receivers)
             for parcel, receiver in zip(parcels, receivers):
                 tx = self.event_recorder.record_transaction(
-                    sender_account=self.mastermind.accounts[0],
+                    sender_account=self.courier.accounts[0],
                     receiver_account=receiver.accounts[0],
                     amount=parcel,
                     currency=self.currencies,
@@ -164,17 +210,14 @@ class Simulation:
                     is_money_laundering=True,
                     ml_typology="placement",
                 )
+                desc = receiver.receive_parcel(parcel) if isinstance(receiver, BusinessOwnerAgent) else receiver.redistribute([parcel])
                 self.event_recorder.record_event(
                     agent_id=receiver.id,
                     agent_role=receiver.role,
                     event_type="receive_parcel",
-                    description=f"Received {parcel} parcel from mastermind",
-                    target_id=self.mastermind.id,
+                    description=desc,
+                    target_id=self.courier.id,
                 )
-                if isinstance(receiver, BusinessOwnerAgent):
-                    receiver.receive_parcel(parcel)
-                elif isinstance(receiver, MuleAgent):
-                    receiver.redistribute([parcel])
                 self._evaluate_risk(tx)
 
         # Layering for businesses
@@ -196,6 +239,13 @@ class Simulation:
                 if hasattr(owner, "integrate_funds"):
                     owner.integrate_funds(amount)
                 self._evaluate_risk(tx)
+
+        # Employee shifts generate legitimate revenue events
+        for business in self.business_owners:
+            staffed = [emp for emp in self.employees if int(emp.id.split("-")[1]) % 3 == self.business_owners.index(business) % 3]
+            for emp in staffed:
+                shift_note = emp.perform_shift(getattr(business, "business_type", "business"))
+                self.event_recorder.record_event(emp.id, emp.role, "shift", shift_note, target_id=business.id)
 
         # Mules distribution schedule
         mule_cfg = schedules.get("mule_payments", {})
@@ -250,6 +300,28 @@ class Simulation:
                 self.event_recorder.record_event(self.back_office.id, self.back_office.role, "salary", f"Paid salary {salary} to {resident.id}")
                 self._evaluate_risk(tx)
 
+        # Deposits at bank tellers (can trigger SAR)
+        depositors = self.business_owners + self.mules + self.residents
+        for depositor in depositors:
+            amount = random.randint(2000, 140000)
+            teller = random.choice(self.bank_tellers)
+            is_launder = isinstance(depositor, (BusinessOwnerAgent, MuleAgent, MastermindAgent))
+            tx = self.event_recorder.record_transaction(
+                sender_account=depositor.accounts[0],
+                receiver_account=teller.accounts[0],
+                amount=amount,
+                currency=self.currencies,
+                tx_type="deposit",
+                is_money_laundering=is_launder,
+                ml_typology="structuring" if is_launder and amount > 90000 else None,
+            )
+            desc = f"Deposit of {amount} by {depositor.id}"
+            if amount >= self.risk_model.high_risk_amount:
+                teller_note = teller.flag_deposit(amount)
+                self.event_recorder.record_event(teller.id, teller.role, "sar", teller_note, target_id=depositor.id)
+            self.event_recorder.record_event(depositor.id, depositor.role, "deposit", desc, target_id=teller.id)
+            self._evaluate_risk(tx)
+
         # Random consumer spending
         for resident in self.residents:
             spend = random.randint(500, 3000)
@@ -264,6 +336,42 @@ class Simulation:
                 ml_typology=None,
             )
             self.event_recorder.record_event(resident.id, resident.role, "spend", f"Spent {spend}")
+            self._evaluate_risk(tx)
+
+        # Peer-to-peer transfers and bill payments to public facilities
+        public_accounts = ["city_hall", "tax_office", "hospital", "school"]
+        for _ in range(len(self.residents)):
+            sender = random.choice(self.residents)
+            receiver = random.choice(self.residents)
+            if sender.id == receiver.id:
+                receiver = random.choice(self.residents)
+            amount = random.randint(200, 5000)
+            tx = self.event_recorder.record_transaction(
+                sender_account=sender.accounts[0],
+                receiver_account=receiver.accounts[0],
+                amount=amount,
+                currency=self.currencies,
+                tx_type="p2p",
+                is_money_laundering=False,
+                ml_typology=None,
+            )
+            self.event_recorder.record_event(sender.id, sender.role, "p2p", f"Sent {amount} to {receiver.id}")
+            self._evaluate_risk(tx)
+
+        for _ in range(2):
+            payer = random.choice(self.residents)
+            facility = random.choice(public_accounts)
+            amount = random.randint(800, 4000)
+            tx = self.event_recorder.record_transaction(
+                sender_account=payer.accounts[0],
+                receiver_account=facility,
+                amount=amount,
+                currency=self.currencies,
+                tx_type="bill",
+                is_money_laundering=False,
+                ml_typology=None,
+            )
+            self.event_recorder.record_event(payer.id, payer.role, "bill", f"Paid {amount} to {facility}")
             self._evaluate_risk(tx)
 
     def _evaluate_risk(self, tx) -> None:

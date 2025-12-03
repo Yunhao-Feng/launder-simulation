@@ -1,6 +1,6 @@
 {
   "seed": 42,
-  "simulation_days": 100,
+  "simulation_days": 2,
   "risk_threshold": 0.8,
   "num_mules": 3,
   "num_residents": 7,

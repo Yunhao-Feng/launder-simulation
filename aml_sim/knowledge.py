@@ -41,7 +41,7 @@ class KnowledgeBase:
         self._embeddings: torch.Tensor | None = None
         for title, text in documents:
             self.add_document(title, text)
-
+    
     def add_document(self, title: str, text: str) -> None:
         embedding = self.embedder.embed(text)
         doc = Document(title=title, text=text, embedding=embedding)
@@ -50,7 +50,7 @@ class KnowledgeBase:
             self._embeddings = embedding.unsqueeze(0)
         else:
             self._embeddings = torch.cat([self._embeddings, embedding.unsqueeze(0)], dim=0)
-
+    
     def query(self, text: str, top_k: int = 3) -> List[Document]:
         if not self.documents:
             return []
@@ -58,7 +58,7 @@ class KnowledgeBase:
         sims = cosine_similarity(self._embeddings, query_vec.unsqueeze(0), dim=1)
         top_indices = torch.argsort(sims, descending=True)[:top_k]
         return [self.documents[i] for i in top_indices.tolist()]
-
+    
     @classmethod
     def from_config(
         cls,
