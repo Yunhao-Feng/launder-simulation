@@ -1,0 +1,218 @@
+You are an AI coding assistant.
+You are working on a small agent-based money-laundering simulator called **launder-simulation** (Python). The key files are:
+
+* `aml_sim/simulation.py` – main Simulation loop and daily transaction generation
+* `aml_sim/agents.py` – agent classes and their behaviors
+* `aml_sim/memory.py` / `aml_sim/knowledge.py` – memory and knowledge retrieval (you do not need to change these right now)
+* `aml_sim/detection.py` – RiskModel for transaction risk scoring
+* `aml_sim/config.py` – configuration for the simulation
+
+Right now, the simulator has only a coarse notion of “typologies”:
+
+```python
+# in aml_sim/simulation.py
+ACCOUNTING_TYPOLOGIES = [
+    "fan-out",
+    "scatter-gather",
+    "cycle",
+    "peel chain",
+]
+```
+
+and uses simple labels like `"placement"`, `"layering"`, `"integration"`, etc. for `tx_type` / `ml_typology` in `EventRecorder.record_transaction(...)`. I want to **explicitly model and label the 8 classic laundering patterns** used in AMLSim / AMLworld:
+
+* Fan-out
+* Fan-in
+* Gather-scatter
+* Scatter-gather
+* Simple cycle
+* Random
+* Bipartite
+* Stack
+
+You should assume a **transaction graph** where:
+
+* A node = a bank account (string ID like `"mule-1-acct-1"`)
+* A directed edge = a transaction from sender_account → receiver_account
+
+All accounts in a given laundering pattern are assumed to be **owned or controlled by the same laundering entity** (e.g. through shell companies), unless otherwise noted.
+
+---
+
+### 1. Precisely model the 8 patterns (conceptual definitions)
+
+Please use these exact structural definitions (these matter for how we later generate transactions and label them):
+
+1. **Fan-out pattern of a vertex v**
+
+   * Let v be a single source account.
+   * v has **k ≥ 2 distinct outgoing neighbors** w₁, w₂, …, wₖ.
+   * For each neighbor wᵢ there is at least one edge (transaction) v → wᵢ, typically within a short time window, representing splitting a lump sum into multiple smaller transfers.
+   * Intuition: split a large amount in v across several other accounts to reduce detection.
+
+2. **Fan-in pattern of a vertex v**
+
+   * v is now a sink account.
+   * v has **k ≥ 2 distinct incoming neighbors** u₁, u₂, …, uₖ.
+   * For each neighbor uᵢ there is at least one edge uᵢ → v, typically within a short time window, representing consolidation.
+   * Intuition: many smaller inputs flowing into a single account.
+
+3. **Gather-scatter pattern at a single vertex v**
+
+   * v simultaneously participates in:
+
+     * a fan-in pattern (multiple distinct predecessors send money into v), and
+     * a fan-out pattern (v sends money out to multiple distinct successors).
+   * So v has k_in ≥ 2 distinct incoming neighbors and k_out ≥ 2 distinct outgoing neighbors.
+   * Intuition: v acts as a hub that gathers funds from many sources and then redistributes them further.
+
+4. **Scatter-gather pattern between vertices v and u via shared intermediates**
+
+   * There is a **fan-out** from a vertex v to a set of intermediate vertices M = {m₁, …, mₖ} (k ≥ 2), i.e. edges v → mᵢ.
+   * There is a **fan-in** into a (possibly different) vertex u from exactly the same set of intermediates M, i.e. edges mᵢ → u.
+   * The set of intermediate vertices on the fan-out and fan-in sides is the same: v → M → u.
+   * Intuition: v scatters funds across intermediaries that later reconverge into u.
+
+5. **Simple cycle pattern**
+
+   * A sequence of distinct vertices v₁, v₂, …, v_L (L ≥ 3) such that:
+
+     * There are edges v₁ → v₂, v₂ → v₃, …, v_{L-1} → v_L, v_L → v₁.
+     * Aside from v₁ == v_L (start/end), **no other vertex is repeated** in the cycle.
+   * Intuition: funds move around a loop and come back to (one of) their origin(s).
+
+6. **Random pattern**
+
+   * A **random walk among accounts controlled by the same entity**.
+   * Funds are moved through a sequence of accounts, but **do not return** to the original account.
+   * Structurally similar to a simple path (no repeated nodes, or at least no return to the starting node), possibly with variable length.
+   * Intuition: move money through a chain of controlled accounts without forming a recognizable pattern like a clean cycle.
+
+7. **Bipartite pattern**
+
+   * Two disjoint sets of vertices:
+
+     * Input accounts: A = {a₁, …, a_m}
+     * Output accounts: B = {b₁, …, b_n}
+   * Edges only go **from A to B**: aᵢ → bⱼ.
+   * No edges within A, no edges within B, and no edges B → A as part of the pattern.
+   * Intuition: a set of senders pay a set of receivers in a relatively dense, bipartite fashion.
+
+8. **Stack pattern**
+
+   * A **multi-layer bipartite structure**, essentially stacking bipartite patterns:
+
+     * First layer: A → B
+     * Second layer: B → C
+     * Optionally more layers: C → D, etc.
+   * Each layer is bipartite (edges only go from previous-layer set to next-layer set), and layers are chained.
+   * Intuition: pass funds through multiple “shell layers” (A to B to C, …) to further obfuscate origin.
+
+You do not need to implement complex subgraph mining.
+You **do** need to be able to generate synthetic transaction sequences that clearly follow these structures and label them.
+
+---
+
+### 2. Code changes to make now (first step in an iterative refactor)
+
+In this step, focus on **adding support for these 8 patterns and their labels** in a clean, extensible way. We will integrate more sophisticated usage later.
+
+Please do the following:
+
+1. **Create a dedicated pattern definition module**
+
+   * Add a new file `aml_sim/patterns.py` with:
+
+     * A `Literal` or simple `Enum`-like class for the 8 pattern names (e.g., strings: `"fan-out"`, `"fan-in"`, `"gather-scatter"`, `"scatter-gather"`, `"simple-cycle"`, `"random"`, `"bipartite"`, `"stack"`).
+     * Python docstrings or comments that restate the exact definitions above, next to each pattern constant, so that future contributors understand the graph structure being modeled.
+   * Optionally expose a `ALL_LAUNDERING_PATTERNS` list with the 8 names.
+
+2. **Update `ACCOUNTING_TYPOLOGIES` in `aml_sim/simulation.py`**
+
+   * Replace or extend the existing `ACCOUNTING_TYPOLOGIES` so that it includes **exactly these 8 laundering pattern names** (you may keep `"peel chain"` as a separate typology if you like, but the eight patterns above must be represented by name).
+   * Ensure that accountant typology selection (`AccountantAgent.design_typology`) uses these updated pattern names.
+
+3. **Extend transaction metadata to carry pattern labels**
+
+   * Locate `EventRecorder` and the `record_transaction` method in `aml_sim/memory.py`.
+   * Extend the transaction data model so that each transaction can optionally carry:
+
+     * `ml_pattern` (string or `Optional[str]`) – the laundering pattern instance this transaction belongs to, if any (e.g. `"fan-out"`, `"scatter-gather"`, etc.).
+     * `pattern_scheme_id` (string or int, optional) – an ID tying multiple transactions together as **one instance** of a pattern (so we can say “these 10 transactions together form one scatter-gather pattern”).
+   * Make sure these new fields:
+
+     * Are stored in-memory,
+     * Are included when writing out CSVs (e.g., `transactions.csv`),
+     * Default to `None` / empty when not specified.
+
+4. **Add helper interfaces in `Simulation` for pattern generation (skeleton only for now)**
+
+   * In `aml_sim/simulation.py`, inside the `Simulation` class, add **private helper methods** with clear signatures, one per pattern, for example:
+
+     ```python
+     def _generate_fan_out_pattern(
+         self,
+         controller_account: str,
+         recipient_accounts: List[str],
+         total_amount: float,
+         currency: str,
+         scheme_id: str,
+     ) -> List[int]:
+         """
+         Generate a fan-out pattern: controller_account sends funds
+         to >= 2 distinct recipient_accounts, splitting total_amount
+         into multiple transactions. Returns list of transaction ids.
+         """
+         ...
+     ```
+
+     Do the same for:
+
+     * `_generate_fan_in_pattern(...)`
+     * `_generate_gather_scatter_pattern(...)`
+     * `_generate_scatter_gather_pattern(...)`
+     * `_generate_simple_cycle_pattern(...)`
+     * `_generate_random_pattern(...)`
+     * `_generate_bipartite_pattern(...)`
+     * `_generate_stack_pattern(...)`
+
+   * In each helper:
+
+     * Use `self.event_recorder.record_transaction(...)` to create the transactions.
+     * Set `is_money_laundering=True`.
+     * Set `ml_typology` to a short description like `"fan-out"`, `"fan-in"`, etc.
+     * Set `ml_pattern` to the same pattern name.
+     * Use `scheme_id` to tag all transactions belonging to the same generated pattern instance.
+     * Make a reasonable splitting of `total_amount` across edges (e.g., random splits that sum up to `total_amount`).
+
+   * At this stage, you do **not** need to fully integrate these helpers into the daily loop logic. It is enough to:
+
+     * Implement the helpers and ensure they can be called without errors if given valid inputs.
+     * Optionally add a small, clearly marked test hook (e.g., a method `generate_debug_pattern_day(...)` or a commented-out example in `_run_day`) to illustrate usage, but keep the existing daily logic intact.
+
+5. **Keep code style consistent and well-documented**
+
+   * Follow existing naming and style conventions in the codebase.
+   * Add docstrings / comments explaining each new helper and each new transaction field.
+   * Do not break existing simulation runs: if no pattern helpers are called, the simulation should still behave as before, only with extra columns in the output CSVs that are mostly empty.
+
+---
+
+### 3. What to output
+
+Please:
+
+1. Modify / create the files as described above.
+2. Show the relevant changed/added code blocks from:
+
+   * `aml_sim/patterns.py`
+   * `aml_sim/simulation.py`
+   * `aml_sim/memory.py` (or wherever `EventRecorder` and transaction data are defined)
+3. Make sure the code you output is syntactically valid Python 3 and integrates cleanly with the existing project.
+
+Do **not** implement the full integration logic (e.g., when during a day each pattern is triggered). We will handle integration into the daily schedule in a later step. For now, the goal is:
+
+* clear pattern definitions,
+* consistent pattern naming,
+* data model support for pattern labels and scheme IDs,
+* and helper methods that can generate transaction sequences matching each of the 8 pattern structures.

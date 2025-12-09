@@ -115,6 +115,8 @@ class Transaction:
     tx_type: str
     is_money_laundering: bool
     ml_typology: str | None
+    ml_pattern: str | None
+    pattern_scheme_id: str | int | None
 
 
 class EventRecorder:
@@ -151,6 +153,8 @@ class EventRecorder:
         tx_type: str,
         is_money_laundering: bool,
         ml_typology: str | None,
+        ml_pattern: str | None = None,
+        pattern_scheme_id: str | int | None = None,
     ) -> Transaction:
         tx = Transaction(
             tx_id=len(self.transactions) + 1,
@@ -162,6 +166,8 @@ class EventRecorder:
             tx_type=tx_type,
             is_money_laundering=is_money_laundering,
             ml_typology=ml_typology,
+            ml_pattern=ml_pattern,
+            pattern_scheme_id=pattern_scheme_id,
         )
         self.transactions.append(tx)
         return tx
@@ -209,6 +215,8 @@ class EventRecorder:
                     "tx_type",
                     "is_money_laundering",
                     "ml_typology",
+                    "ml_pattern",
+                    "pattern_scheme_id",
                 ]
             )
             for tx in self.transactions:
@@ -223,5 +231,7 @@ class EventRecorder:
                         tx.tx_type,
                         int(tx.is_money_laundering),
                         tx.ml_typology or "",
+                        tx.ml_pattern or "",
+                        tx.pattern_scheme_id or "",
                     ]
                 )

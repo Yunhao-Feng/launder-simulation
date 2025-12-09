@@ -21,14 +21,20 @@ from .config import SimulationConfig
 from .detection import RiskModel
 from .knowledge import DPRTextEmbedder, KnowledgeBase
 from .memory import AgentMemory, EventRecorder
+from .patterns import (
+    ALL_LAUNDERING_PATTERNS,
+    BIPARTITE,
+    FAN_IN,
+    FAN_OUT,
+    GATHER_SCATTER,
+    RANDOM,
+    SCATTER_GATHER,
+    SIMPLE_CYCLE,
+    STACK,
+)
 
 
-ACCOUNTING_TYPOLOGIES = [
-    "fan-out",
-    "scatter-gather",
-    "cycle",
-    "peel chain",
-]
+ACCOUNTING_TYPOLOGIES = ALL_LAUNDERING_PATTERNS + ["peel chain"]
 
 
 class Simulation:
@@ -380,3 +386,320 @@ class Simulation:
             regulator = random.choice(self.regulators)
             note = regulator.open_investigation(tx.tx_id, score)
             self.event_recorder.record_event(regulator.id, regulator.role, "sar", note, target_id=str(tx.tx_id))
+    
+    def _split_amount(self, total_amount: float, parts: int) -> List[float]:
+        """Split ``total_amount`` into ``parts`` positive values that sum to the original."""
+
+        if parts <= 0:
+            return []
+        weights = [random.random() for _ in range(parts)]
+        weight_sum = sum(weights) or 1.0
+        allocations = [round(total_amount * w / weight_sum, 2) for w in weights]
+        remainder = round(total_amount - sum(allocations), 2)
+        if allocations:
+            allocations[0] = round(allocations[0] + remainder, 2)
+        return allocations
+    
+    def _generate_fan_out_pattern(
+        self,
+        controller_account: str,
+        recipient_accounts: List[str],
+        total_amount: float,
+        currency: str,
+        scheme_id: str,
+    ) -> List[int]:
+        """
+        Generate a fan-out pattern where a single source splits funds to >=2 recipients.
+
+        Funds from ``controller_account`` are split across ``recipient_accounts``. All
+        transactions are labeled with the fan-out pattern and linked by ``scheme_id``.
+        Returns the list of created transaction ids.
+        """
+
+        if len(recipient_accounts) < 2:
+            raise ValueError("Fan-out pattern requires at least two recipient accounts")
+
+        allocations = self._split_amount(total_amount, len(recipient_accounts))
+        tx_ids: List[int] = []
+        for receiver, amount in zip(recipient_accounts, allocations):
+            tx = self.event_recorder.record_transaction(
+                sender_account=controller_account,
+                receiver_account=receiver,
+                amount=amount,
+                currency=currency,
+                tx_type="layering",
+                is_money_laundering=True,
+                ml_typology=FAN_OUT,
+                ml_pattern=FAN_OUT,
+                pattern_scheme_id=scheme_id,
+            )
+            tx_ids.append(tx.tx_id)
+        return tx_ids
+
+    def _generate_fan_in_pattern(
+        self,
+        source_accounts: List[str],
+        sink_account: str,
+        total_amount: float,
+        currency: str,
+        scheme_id: str,
+    ) -> List[int]:
+        """
+        Generate a fan-in pattern where multiple sources consolidate into a sink.
+        """
+
+        if len(source_accounts) < 2:
+            raise ValueError("Fan-in pattern requires at least two source accounts")
+
+        allocations = self._split_amount(total_amount, len(source_accounts))
+        tx_ids: List[int] = []
+        for sender, amount in zip(source_accounts, allocations):
+            tx = self.event_recorder.record_transaction(
+                sender_account=sender,
+                receiver_account=sink_account,
+                amount=amount,
+                currency=currency,
+                tx_type="layering",
+                is_money_laundering=True,
+                ml_typology=FAN_IN,
+                ml_pattern=FAN_IN,
+                pattern_scheme_id=scheme_id,
+            )
+            tx_ids.append(tx.tx_id)
+        return tx_ids
+
+    def _generate_gather_scatter_pattern(
+        self,
+        gather_account: str,
+        source_accounts: List[str],
+        recipient_accounts: List[str],
+        total_amount: float,
+        currency: str,
+        scheme_id: str,
+    ) -> List[int]:
+        """
+        Generate a gather-scatter pattern where one hub gathers then redistributes.
+        """
+
+        if len(source_accounts) < 2 or len(recipient_accounts) < 2:
+            raise ValueError("Gather-scatter requires at least two sources and two recipients")
+
+        incoming_amounts = self._split_amount(total_amount, len(source_accounts))
+        outgoing_amounts = self._split_amount(total_amount, len(recipient_accounts))
+        tx_ids: List[int] = []
+
+        for sender, amount in zip(source_accounts, incoming_amounts):
+            tx = self.event_recorder.record_transaction(
+                sender_account=sender,
+                receiver_account=gather_account,
+                amount=amount,
+                currency=currency,
+                tx_type="layering",
+                is_money_laundering=True,
+                ml_typology=GATHER_SCATTER,
+                ml_pattern=GATHER_SCATTER,
+                pattern_scheme_id=scheme_id,
+            )
+            tx_ids.append(tx.tx_id)
+
+        for receiver, amount in zip(recipient_accounts, outgoing_amounts):
+            tx = self.event_recorder.record_transaction(
+                sender_account=gather_account,
+                receiver_account=receiver,
+                amount=amount,
+                currency=currency,
+                tx_type="layering",
+                is_money_laundering=True,
+                ml_typology=GATHER_SCATTER,
+                ml_pattern=GATHER_SCATTER,
+                pattern_scheme_id=scheme_id,
+            )
+            tx_ids.append(tx.tx_id)
+        return tx_ids
+
+    def _generate_scatter_gather_pattern(
+        self,
+        source_account: str,
+        sink_account: str,
+        intermediate_accounts: List[str],
+        total_amount: float,
+        currency: str,
+        scheme_id: str,
+    ) -> List[int]:
+        """
+        Generate a scatter-gather pattern using shared intermediates between source and sink.
+        """
+
+        if len(intermediate_accounts) < 2:
+            raise ValueError("Scatter-gather requires at least two intermediates")
+
+        scatter_amounts = self._split_amount(total_amount, len(intermediate_accounts))
+        gather_amounts = self._split_amount(total_amount, len(intermediate_accounts))
+        tx_ids: List[int] = []
+
+        for receiver, amount in zip(intermediate_accounts, scatter_amounts):
+            tx = self.event_recorder.record_transaction(
+                sender_account=source_account,
+                receiver_account=receiver,
+                amount=amount,
+                currency=currency,
+                tx_type="layering",
+                is_money_laundering=True,
+                ml_typology=SCATTER_GATHER,
+                ml_pattern=SCATTER_GATHER,
+                pattern_scheme_id=scheme_id,
+            )
+            tx_ids.append(tx.tx_id)
+
+        for sender, amount in zip(intermediate_accounts, gather_amounts):
+            tx = self.event_recorder.record_transaction(
+                sender_account=sender,
+                receiver_account=sink_account,
+                amount=amount,
+                currency=currency,
+                tx_type="layering",
+                is_money_laundering=True,
+                ml_typology=SCATTER_GATHER,
+                ml_pattern=SCATTER_GATHER,
+                pattern_scheme_id=scheme_id,
+            )
+            tx_ids.append(tx.tx_id)
+        return tx_ids
+
+    def _generate_simple_cycle_pattern(
+        self,
+        accounts: List[str],
+        total_amount: float,
+        currency: str,
+        scheme_id: str,
+    ) -> List[int]:
+        """
+        Generate a simple directed cycle across distinct accounts.
+        """
+
+        if len(accounts) < 3:
+            raise ValueError("Simple cycle requires at least three distinct accounts")
+
+        allocations = self._split_amount(total_amount, len(accounts))
+        tx_ids: List[int] = []
+        for idx, sender in enumerate(accounts):
+            receiver = accounts[(idx + 1) % len(accounts)]
+            tx = self.event_recorder.record_transaction(
+                sender_account=sender,
+                receiver_account=receiver,
+                amount=allocations[idx],
+                currency=currency,
+                tx_type="layering",
+                is_money_laundering=True,
+                ml_typology=SIMPLE_CYCLE,
+                ml_pattern=SIMPLE_CYCLE,
+                pattern_scheme_id=scheme_id,
+            )
+            tx_ids.append(tx.tx_id)
+        return tx_ids
+
+    def _generate_random_pattern(
+        self,
+        account_path: List[str],
+        total_amount: float,
+        currency: str,
+        scheme_id: str,
+    ) -> List[int]:
+        """
+        Generate a random-walk-style chain without returning to the origin.
+        """
+
+        if len(account_path) < 2:
+            raise ValueError("Random pattern requires at least two accounts")
+
+        allocations = self._split_amount(total_amount, len(account_path) - 1)
+        tx_ids: List[int] = []
+        for idx in range(len(account_path) - 1):
+            tx = self.event_recorder.record_transaction(
+                sender_account=account_path[idx],
+                receiver_account=account_path[idx + 1],
+                amount=allocations[idx],
+                currency=currency,
+                tx_type="layering",
+                is_money_laundering=True,
+                ml_typology=RANDOM,
+                ml_pattern=RANDOM,
+                pattern_scheme_id=scheme_id,
+            )
+            tx_ids.append(tx.tx_id)
+        return tx_ids
+
+    def _generate_bipartite_pattern(
+        self,
+        sender_accounts: List[str],
+        receiver_accounts: List[str],
+        total_amount: float,
+        currency: str,
+        scheme_id: str,
+    ) -> List[int]:
+        """
+        Generate a bipartite pattern with edges only from senders to receivers.
+        """
+
+        if not sender_accounts or not receiver_accounts:
+            raise ValueError("Bipartite pattern requires sender and receiver accounts")
+
+        edge_count = len(sender_accounts) * len(receiver_accounts)
+        allocations = self._split_amount(total_amount, edge_count)
+        tx_ids: List[int] = []
+        for sender in sender_accounts:
+            for receiver in receiver_accounts:
+                amount = allocations.pop(0)
+                tx = self.event_recorder.record_transaction(
+                    sender_account=sender,
+                    receiver_account=receiver,
+                    amount=amount,
+                    currency=currency,
+                    tx_type="layering",
+                    is_money_laundering=True,
+                    ml_typology=BIPARTITE,
+                    ml_pattern=BIPARTITE,
+                    pattern_scheme_id=scheme_id,
+                )
+                tx_ids.append(tx.tx_id)
+        return tx_ids
+
+    def _generate_stack_pattern(
+        self,
+        layers: List[List[str]],
+        total_amount: float,
+        currency: str,
+        scheme_id: str,
+    ) -> List[int]:
+        """
+        Generate a stacked multi-layer bipartite structure across successive layers.
+        """
+
+        if len(layers) < 2:
+            raise ValueError("Stack pattern requires at least two layers of accounts")
+
+        tx_ids: List[int] = []
+        layer_amounts = total_amount
+        for idx in range(len(layers) - 1):
+            src_layer = layers[idx]
+            dst_layer = layers[idx + 1]
+            if not src_layer or not dst_layer:
+                raise ValueError("Each stack layer must contain at least one account")
+            edge_count = len(src_layer) * len(dst_layer)
+            allocations = self._split_amount(layer_amounts, edge_count)
+            for sender in src_layer:
+                for receiver in dst_layer:
+                    amount = allocations.pop(0)
+                    tx = self.event_recorder.record_transaction(
+                        sender_account=sender,
+                        receiver_account=receiver,
+                        amount=amount,
+                        currency=currency,
+                        tx_type="layering",
+                        is_money_laundering=True,
+                        ml_typology=STACK,
+                        ml_pattern=STACK,
+                        pattern_scheme_id=scheme_id,
+                    )
+                    tx_ids.append(tx.tx_id)
+        return tx_ids

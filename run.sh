@@ -1,5 +1,9 @@
 export ALL_PROXY=socks5://127.0.0.1:20170
 export http_proxy=http://127.0.0.1:20171
 export https_proxy=http://127.0.0.1:20171
+export OPENBLAS_NUM_THREADS=32
+export OMP_NUM_THREADS=32
+export MKL_NUM_THREADS=32
 export OPENAI_API_KEY=""
 export OPENAI_API_BASE="https://api.openai.com/v1"
+python main.py
