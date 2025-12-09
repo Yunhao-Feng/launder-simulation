@@ -2,9 +2,10 @@ from __future__ import annotations
 
 import random
 from datetime import datetime, timedelta
-from typing import Dict, List
+from typing import Dict, List, Tuple
 
 from .agents import (
+    AccountProfile,
     AccountantAgent,
     BackOfficeAgent,
     BankTellerAgent,
@@ -17,8 +18,10 @@ from .agents import (
     RegulatorAgent,
     ResidentAgent,
 )
+from .banking import Bank, load_banks
 from .config import SimulationConfig
 from .detection import RiskModel
+from .entities import Company, Person
 from .knowledge import DPRTextEmbedder, KnowledgeBase
 from .memory import AgentMemory, EventRecorder
 from .patterns import (
@@ -41,6 +44,16 @@ class Simulation:
     def __init__(self, config: SimulationConfig):
         self.config = config
         random.seed(config.seed)
+        self.population_scale = config.population_scale or 1.0
+        self.transaction_scale = config.transaction_scale or 1.0
+        self.laundering_intensity = config.laundering_intensity
+        self.banks: Dict[str, Bank] = load_banks(config.banks)
+        self.fx_rates: Dict[Tuple[str, str], float] = {
+            (k[0], k[1]): float(v) if isinstance(k, tuple) else float(v)
+            for k, v in ((key if isinstance(key, tuple) else key.split("-"), val) for key, val in config.fx_rates.items())
+            if len(k) == 2
+        }
+        self.default_currency = config.default_currency
         self.embedder = DPRTextEmbedder(model_path=config.knowledge_model_path, device=config.knowledge_device)
         self.knowledge_base = KnowledgeBase.from_config(
             config.knowledge_documents,
@@ -48,7 +61,11 @@ class Simulation:
             device=config.knowledge_device,
             embedder=self.embedder,
         )
-        self.event_recorder = EventRecorder()
+        self.event_recorder = EventRecorder(
+            banks=self.banks,
+            fx_rates=self.fx_rates,
+            default_currency=self.default_currency,
+        )
         self.risk_model = RiskModel(config.risk_threshold, config.risk_model)
 
         self.boss: BossAgent = self._create_boss()
@@ -63,13 +80,46 @@ class Simulation:
         self.back_office: BackOfficeAgent = self._create_back_office()
         self.regulators: List[RegulatorAgent] = self._create_regulators()
 
-        self.currencies = "CNY"
+        self.person_entities: List[Person] = [
+            Person(resident.id, resident.role, [acct.account_id for acct in resident.accounts])
+            for resident in self.residents
+        ]
+        self.companies: List[Company] = self._create_companies()
+        self.company_staff = self._assign_staff_to_companies()
+
+        self.currencies = self.default_currency
 
     def _memory(self, max_items: int = 500) -> AgentMemory:
         return AgentMemory(max_items=max_items, embedder=self.embedder)
+    
+    def _scale_count(self, value: int) -> int:
+        scaled = int(value * self.population_scale)
+        return scaled if scaled > 0 else value
+
+    def _choose_bank_and_currency(self) -> Tuple[str, str]:
+        bank = random.choice(list(self.banks.values()))
+        currency = self.default_currency if self.default_currency in bank.supported_currencies else bank.supported_currencies[0]
+        return bank.bank_id, currency
+
+    def _register_account(self, account_id: str, clean_balance: float = 0.0, illicit_balance: float = 0.0) -> AccountProfile:
+        bank_id, currency = self._choose_bank_and_currency()
+        state = self.event_recorder.register_account(
+            account_id=account_id,
+            bank_id=bank_id,
+            currency=currency,
+            clean_balance=clean_balance,
+            illicit_balance=illicit_balance,
+        )
+        return AccountProfile(
+            account_id=state.account_id,
+            bank_id=state.bank_id,
+            currency=state.currency,
+            clean_balance=state.clean_balance,
+            illicit_balance=state.illicit_balance,
+        )
 
     def _base_agent(self, idx: int, role: str):
-        account = f"{role}-{idx}-acct"
+        account = self._register_account(f"{role}-{idx}-acct", clean_balance=10000)
         return self._memory(), [account]
 
     def _create_boss(self) -> BossAgent:
@@ -117,22 +167,30 @@ class Simulation:
 
     def _create_employees(self) -> List[EmployeeAgent]:
         employees: List[EmployeeAgent] = []
-        for idx in range(1, self.config.num_employees + 1):
+        for idx in range(1, self._scale_count(self.config.num_employees) + 1):
             mem, accounts = self._base_agent(idx, "employee")
             employees.append(EmployeeAgent(f"employee-{idx}", "Employee", accounts, mem, self.knowledge_base))
         return employees
 
     def _create_mules(self) -> List[MuleAgent]:
         mules = []
-        for idx in range(1, self.config.num_mules + 1):
+        for idx in range(1, self._scale_count(self.config.num_mules) + 1):
             accounts = [f"mule-{idx}-acct-1", f"mule-{idx}-acct-2"]
             mem = self._memory(max_items=300)
-            mules.append(MuleAgent(f"mule-{idx}", "Money Mule", accounts, mem, self.knowledge_base))
+            mules.append(
+                MuleAgent(
+                    f"mule-{idx}",
+                    "Money Mule",
+                    [self._register_account(acc) for acc in accounts],
+                    mem,
+                    self.knowledge_base,
+                )
+            )
         return mules
 
     def _create_residents(self) -> List[ResidentAgent]:
         residents = []
-        for idx in range(1, self.config.num_residents + 1):
+        for idx in range(1, self._scale_count(self.config.num_residents) + 1):
             mem, accounts = self._base_agent(idx, "resident")
             residents.append(ResidentAgent(f"resident-{idx}", "Resident", accounts, mem, self.knowledge_base))
         return residents
@@ -150,20 +208,78 @@ class Simulation:
 
     def _create_regulators(self) -> List[RegulatorAgent]:
         regulators = []
-        for idx in range(1, self.config.num_regulators + 1):
+        for idx in range(1, self._scale_count(self.config.num_regulators) + 1):
             mem, accounts = self._base_agent(idx, "regulator")
             regulators.append(RegulatorAgent(f"regulator-{idx}", "Regulator", accounts, mem, self.knowledge_base))
         return regulators
+    
+    def _create_companies(self) -> List[Company]:
+        companies: List[Company] = []
+        total_real = self._scale_count(self.config.num_real_companies)
+        total_shell = self._scale_count(self.config.num_shell_companies)
+
+        for idx in range(1, total_real + 1):
+            account = self._register_account(f"company-real-{idx}")
+            owner_agent = random.choice(self.business_owners)
+            company = Company(
+                id=f"company-real-{idx}",
+                name=f"RealCo-{idx}",
+                accounts=[account.account_id],
+                owners=[Person(owner_agent.id, owner_agent.role, [acct.account_id for acct in owner_agent.accounts])],
+                suppliers=[],
+                customers=[],
+                is_shell=False,
+            )
+            companies.append(company)
+
+        for idx in range(1, total_shell + 1):
+            account = self._register_account(f"company-shell-{idx}", illicit_balance=20000 * self.laundering_intensity)
+            owner_choice = random.choice(companies) if companies else random.choice(self.business_owners)
+            owner_entity = (
+                owner_choice
+                if isinstance(owner_choice, Company)
+                else Person(owner_choice.id, getattr(owner_choice, "role", "owner"), [acct.account_id for acct in owner_choice.accounts])
+            )
+            company = Company(
+                id=f"company-shell-{idx}",
+                name=f"ShellCo-{idx}",
+                accounts=[account.account_id],
+                owners=[owner_entity],
+                suppliers=[],
+                customers=[],
+                is_shell=True,
+            )
+            companies.append(company)
+
+        for company in companies:
+            degree = max(1, self.config.supplier_graph_degree)
+            partners = [c for c in companies if c.id != company.id]
+            random.shuffle(partners)
+            for supplier in partners[:degree]:
+                company.add_supplier(supplier)
+            for _ in range(degree):
+                company.add_customer(random.choice(self.person_entities) if self.person_entities else company)
+        return companies
+
+    def _assign_staff_to_companies(self):
+        staff_map: Dict[str, List[EmployeeAgent]] = {c.id: [] for c in self.companies}
+        if not staff_map:
+            return staff_map
+        for emp in self.employees:
+            company = random.choice(self.companies)
+            staff_map[company.id].append(emp)
+        return staff_map
     
     def run(self) -> None:
         start_date = datetime(2024, 1, 1)
         for day_idx in range(self.config.simulation_days):
             current_date = start_date + timedelta(days=day_idx)
-            self._run_day(current_date)
+            self._run_day(current_date, day_idx)
     
-    def _run_day(self, current_date: datetime) -> None:
+    def _run_day(self, current_date: datetime, day_index: int) -> None:
         weekday = current_date.strftime("%A")
         schedules = self.config.daily_schedules
+        self.event_recorder.release_settlements(day_index)
 
         # Strategy and planning by boss and accountants
         boss_plan = self.boss.plan_strategy()
@@ -193,13 +309,14 @@ class Simulation:
             self.event_recorder.record_event(self.courier.id, self.courier.role, "pickup", courier_desc, target_id=self.mastermind.id)
 
             courier_tx = self.event_recorder.record_transaction(
-                sender_account=self.mastermind.accounts[0],
-                receiver_account=self.courier.accounts[0],
+                sender_account=self.mastermind.primary_account,
+                receiver_account=self.courier.primary_account,
                 amount=sum(parcels),
                 currency=self.currencies,
                 tx_type="placement",
                 is_money_laundering=True,
                 ml_typology="placement",
+                current_day=day_index,
             )
             self._evaluate_risk(courier_tx)
 
@@ -208,13 +325,14 @@ class Simulation:
             random.shuffle(receivers)
             for parcel, receiver in zip(parcels, receivers):
                 tx = self.event_recorder.record_transaction(
-                    sender_account=self.courier.accounts[0],
-                    receiver_account=receiver.accounts[0],
+                    sender_account=self.courier.primary_account,
+                    receiver_account=receiver.primary_account,
                     amount=parcel,
                     currency=self.currencies,
                     tx_type="placement",
                     is_money_laundering=True,
                     ml_typology="placement",
+                    current_day=day_index,
                 )
                 desc = receiver.receive_parcel(parcel) if isinstance(receiver, BusinessOwnerAgent) else receiver.redistribute([parcel])
                 self.event_recorder.record_event(
@@ -233,19 +351,76 @@ class Simulation:
             if weekday in rule.get("days", []):
                 amount = rule.get("amount", 20000)
                 tx = self.event_recorder.record_transaction(
-                    sender_account=self.mastermind.accounts[0],
-                    receiver_account=owner.accounts[0],
+                    sender_account=self.mastermind.primary_account,
+                    receiver_account=owner.primary_account,
                     amount=amount,
                     currency=self.currencies,
                     tx_type="layering",
                     is_money_laundering=True,
                     ml_typology="business_layering",
+                    current_day=day_index,
                 )
                 self.event_recorder.record_event(owner.id, owner.role, "business_intake", f"Layering inflow {amount}")
                 if hasattr(owner, "integrate_funds"):
                     owner.integrate_funds(amount)
                 self._evaluate_risk(tx)
 
+        # Company-level activities (B2B, suppliers, payroll)
+        for company in self.companies:
+            company_account = company.accounts[0] if company.accounts else ""
+            shell_bias = self.laundering_intensity if company.is_shell else self.laundering_intensity * 0.2
+
+            # Revenue from customers
+            for _ in range(max(1, int(self.transaction_scale))):
+                if not company.customers:
+                    break
+                customer = random.choice(company.customers)
+                sender_account = customer.accounts[0] if isinstance(customer, Person) else (customer.accounts[0] if customer.accounts else company_account)
+                amount = random.randint(3000, 12000)
+                tx = self.event_recorder.record_transaction(
+                    sender_account=sender_account,
+                    receiver_account=company_account,
+                    amount=amount,
+                    currency=self.currencies,
+                    tx_type="revenue",
+                    is_money_laundering=company.is_shell and random.random() < shell_bias,
+                    ml_typology="customer_inflow" if company.is_shell else None,
+                    current_day=day_index,
+                )
+                self._evaluate_risk(tx)
+
+            # Supplier payments
+            for supplier in company.suppliers:
+                if random.random() > self.transaction_scale:
+                    continue
+                amount = random.randint(4000, 15000)
+                tx = self.event_recorder.record_transaction(
+                    sender_account=company_account,
+                    receiver_account=supplier.accounts[0] if supplier.accounts else company_account,
+                    amount=amount,
+                    currency=self.currencies,
+                    tx_type="supplier_payment",
+                    is_money_laundering=company.is_shell and random.random() < shell_bias,
+                    ml_typology="supplier_layering" if company.is_shell else None,
+                    current_day=day_index,
+                )
+                self._evaluate_risk(tx)
+
+            # Payroll to staff
+            for emp in self.company_staff.get(company.id, []):
+                pay_amount = random.randint(3000, 8000)
+                tx = self.event_recorder.record_transaction(
+                    sender_account=company_account,
+                    receiver_account=emp.primary_account,
+                    amount=pay_amount,
+                    currency=self.currencies,
+                    tx_type="payroll",
+                    is_money_laundering=company.is_shell and random.random() < shell_bias,
+                    ml_typology="inflated_payroll" if company.is_shell else None,
+                    current_day=day_index,
+                )
+                self._evaluate_risk(tx)
+                
         # Employee shifts generate legitimate revenue events
         for business in self.business_owners:
             staffed = [emp for emp in self.employees if int(emp.id.split("-")[1]) % 3 == self.business_owners.index(business) % 3]
@@ -257,18 +432,20 @@ class Simulation:
         mule_cfg = schedules.get("mule_payments", {})
         if weekday in mule_cfg.get("days", []):
             for mule in self.mules:
-                payments = [mule_cfg.get("payment_amount", 2000)] * mule_cfg.get("payment_count", 5)
+                payment_count = int(mule_cfg.get("payment_count", 5) * self.transaction_scale) or 1
+                payments = [mule_cfg.get("payment_amount", 2000)] * payment_count
                 mule.redistribute(payments)
                 for amt in payments:
                     target = random.choice(self.residents + self.business_owners)
                     tx = self.event_recorder.record_transaction(
-                        sender_account=mule.accounts[0],
-                        receiver_account=target.accounts[0],
+                        sender_account=mule.primary_account,
+                        receiver_account=target.primary_account,
                         amount=amt,
                         currency=self.currencies,
                         tx_type="layering",
                         is_money_laundering=True,
                         ml_typology="mule_scatter",
+                        current_day=day_index,
                     )
                     self.event_recorder.record_event(mule.id, mule.role, "mule_transfer", f"Sent {amt} to {target.id}")
                     self._evaluate_risk(tx)
@@ -279,13 +456,14 @@ class Simulation:
             desc = owner.integrate_funds(payroll_amount)
             self.event_recorder.record_event(owner.id, owner.role, "integration", desc)
             tx = self.event_recorder.record_transaction(
-                sender_account=owner.accounts[0],
-                receiver_account=random.choice(self.residents).accounts[0],
+                sender_account=owner.primary_account,
+                receiver_account=random.choice(self.residents).primary_account,
                 amount=payroll_amount,
                 currency=self.currencies,
                 tx_type="integration",
                 is_money_laundering=False,
                 ml_typology=None,
+                current_day=day_index,
             )
             self._evaluate_risk(tx)
 
@@ -295,13 +473,14 @@ class Simulation:
                 salary = random.randint(20000, 50000)
                 resident.normal_activity(salary)
                 tx = self.event_recorder.record_transaction(
-                    sender_account=self.back_office.accounts[0],
-                    receiver_account=resident.accounts[0],
+                    sender_account=self.back_office.primary_account,
+                    receiver_account=resident.primary_account,
                     amount=salary,
                     currency=self.currencies,
                     tx_type="salary",
                     is_money_laundering=False,
                     ml_typology=None,
+                    current_day=day_index,
                 )
                 self.event_recorder.record_event(self.back_office.id, self.back_office.role, "salary", f"Paid salary {salary} to {resident.id}")
                 self._evaluate_risk(tx)
@@ -313,13 +492,14 @@ class Simulation:
             teller = random.choice(self.bank_tellers)
             is_launder = isinstance(depositor, (BusinessOwnerAgent, MuleAgent, MastermindAgent))
             tx = self.event_recorder.record_transaction(
-                sender_account=depositor.accounts[0],
-                receiver_account=teller.accounts[0],
+                sender_account=depositor.primary_account,
+                receiver_account=teller.primary_account,
                 amount=amount,
                 currency=self.currencies,
                 tx_type="deposit",
                 is_money_laundering=is_launder,
                 ml_typology="structuring" if is_launder and amount > 90000 else None,
+                current_day=day_index,
             )
             desc = f"Deposit of {amount} by {depositor.id}"
             if amount >= self.risk_model.high_risk_amount:
@@ -333,55 +513,59 @@ class Simulation:
             spend = random.randint(500, 3000)
             resident.normal_activity(spend)
             tx = self.event_recorder.record_transaction(
-                sender_account=resident.accounts[0],
-                receiver_account=random.choice(self.business_owners).accounts[0],
+                sender_account=resident.primary_account,
+                receiver_account=random.choice(self.business_owners).primary_account,
                 amount=spend,
                 currency=self.currencies,
                 tx_type="spend",
                 is_money_laundering=False,
                 ml_typology=None,
+                current_day=day_index,
             )
             self.event_recorder.record_event(resident.id, resident.role, "spend", f"Spent {spend}")
             self._evaluate_risk(tx)
 
         # Peer-to-peer transfers and bill payments to public facilities
         public_accounts = ["city_hall", "tax_office", "hospital", "school"]
-        for _ in range(len(self.residents)):
+        p2p_iterations = max(1, int(len(self.residents) * self.transaction_scale))
+        for _ in range(p2p_iterations):
             sender = random.choice(self.residents)
             receiver = random.choice(self.residents)
             if sender.id == receiver.id:
                 receiver = random.choice(self.residents)
             amount = random.randint(200, 5000)
             tx = self.event_recorder.record_transaction(
-                sender_account=sender.accounts[0],
-                receiver_account=receiver.accounts[0],
+                sender_account=sender.primary_account,
+                receiver_account=receiver.primary_account,
                 amount=amount,
                 currency=self.currencies,
                 tx_type="p2p",
                 is_money_laundering=False,
                 ml_typology=None,
+                current_day=day_index,
             )
             self.event_recorder.record_event(sender.id, sender.role, "p2p", f"Sent {amount} to {receiver.id}")
             self._evaluate_risk(tx)
 
-        for _ in range(2):
+        for _ in range(max(1, int(2 * self.transaction_scale))):
             payer = random.choice(self.residents)
             facility = random.choice(public_accounts)
             amount = random.randint(800, 4000)
             tx = self.event_recorder.record_transaction(
-                sender_account=payer.accounts[0],
+                sender_account=payer.primary_account,
                 receiver_account=facility,
                 amount=amount,
                 currency=self.currencies,
                 tx_type="bill",
                 is_money_laundering=False,
                 ml_typology=None,
+                current_day=day_index,
             )
             self.event_recorder.record_event(payer.id, payer.role, "bill", f"Paid {amount} to {facility}")
             self._evaluate_risk(tx)
 
     def _evaluate_risk(self, tx) -> None:
-        score = self.risk_model.score_transaction(tx.amount, tx.is_money_laundering)
+        score = self.risk_model.score_transaction(tx.amount, tx.is_money_laundering, tx.illicit_amount, tx.illicit_fraction)
         if score >= self.config.risk_threshold:
             regulator = random.choice(self.regulators)
             note = regulator.open_investigation(tx.tx_id, score)

@@ -1,11 +1,30 @@
 {
   "seed": 42,
   "simulation_days": 2,
+  "scenario": "LI",
+  "population_scale": 1.0,
+  "transaction_scale": 1.0,
+  "laundering_intensity": 0.001,
   "risk_threshold": 0.8,
   "num_mules": 3,
   "num_residents": 7,
   "num_employees": 6,
   "num_regulators": 2,
+  "num_shell_companies": 2,
+  "num_real_companies": 2,
+  "ownership_graph_depth": 1,
+  "supplier_graph_degree": 2,
+  "banks": [
+    {"bank_id": "B1", "name": "MetroBank", "supported_currencies": ["CNY", "USD"], "transfer_fee": 0.005, "interbank_delay_days": 1},
+    {"bank_id": "B2", "name": "Continental", "supported_currencies": ["CNY", "EUR"], "transfer_fee": 0.003, "interbank_delay_days": 0}
+  ],
+  "fx_rates": {
+    "USD-CNY": 7.1,
+    "CNY-USD": 0.14,
+    "EUR-CNY": 7.8,
+    "CNY-EUR": 0.13
+  },
+  "default_currency": "CNY",
   "risk_model": {
     "laundering_amount_threshold": 80000,
     "high_risk_amount": 100000

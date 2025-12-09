@@ -7,12 +7,17 @@ from typing import List, Optional
 
 from openai import OpenAI
 
-
-
-
-
 from .knowledge import KnowledgeBase
 from .memory import AgentMemory
+
+
+@dataclasses.dataclass
+class AccountProfile:
+    account_id: str
+    bank_id: str
+    currency: str
+    clean_balance: float = 0.0
+    illicit_balance: float = 0.0
 
 
 class ReasoningEngine:
@@ -85,7 +90,7 @@ class ReasoningEngine:
 class Agent:
     id: str
     role: str
-    accounts: List[str]
+    accounts: List[AccountProfile]
     memory: AgentMemory
     knowledge_base: KnowledgeBase
     reasoner: ReasoningEngine = dataclasses.field(default_factory=ReasoningEngine)
@@ -102,6 +107,10 @@ class Agent:
         knowledge_block = "\n".join(kb_texts) or "(no retrieved cases)"
         return self.reasoner.run(self.role, query, memory_block, knowledge_block, commonsense)
 
+    @property
+    def primary_account(self) -> str:
+        return self.accounts[0].account_id if self.accounts else ""
+    
     def decide_next_action(self, query: str, observation: str | None = None) -> str:
         decision = self.retrieve_context(query)
         memo_line = observation or query

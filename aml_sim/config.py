@@ -17,12 +17,23 @@ class SimulationConfig:
     num_residents: int
     num_employees: int
     num_regulators: int
+    num_shell_companies: int
+    num_real_companies: int
+    ownership_graph_depth: int
+    supplier_graph_degree: int
+    scenario: str
+    population_scale: float
+    transaction_scale: float
+    laundering_intensity: float
+    banks: List[Dict[str, Any]]
+    fx_rates: Dict[str, float]
     role_descriptions: Dict[str, str]
     daily_schedules: Dict[str, Any]
     knowledge_documents: List[Dict[str, str]]
     knowledge_model_path: str
     knowledge_device: str | None
     risk_model: Dict[str, Any]
+    default_currency: str
 
 
 def _load_raw_config(path: str | Path) -> Dict[str, Any]:
@@ -36,6 +47,15 @@ def _load_raw_config(path: str | Path) -> Dict[str, Any]:
 def load_config(path: str | Path) -> SimulationConfig:
     raw = _load_raw_config(path)
     knowledge_cfg = raw.get("knowledge", {})
+    scenario = raw.get("scenario", "LI")
+    population_scale = float(raw.get("population_scale", 1.0))
+    transaction_scale = float(raw.get("transaction_scale", 1.0))
+    laundering_intensity = float(
+        raw.get(
+            "laundering_intensity",
+            0.08 if scenario == "HI" else 0.001 if scenario == "LI" else 0.01,
+        )
+    )
     return SimulationConfig(
         seed=raw.get("seed", 0),
         simulation_days=raw.get("simulation_days", 1),
@@ -44,12 +64,23 @@ def load_config(path: str | Path) -> SimulationConfig:
         num_residents=raw.get("num_residents", 0),
         num_employees=raw.get("num_employees", 0),
         num_regulators=raw.get("num_regulators", 0),
+        num_shell_companies=raw.get("num_shell_companies", 0),
+        num_real_companies=raw.get("num_real_companies", 0),
+        ownership_graph_depth=raw.get("ownership_graph_depth", 1),
+        supplier_graph_degree=raw.get("supplier_graph_degree", 1),
+        scenario=scenario,
+        population_scale=population_scale,
+        transaction_scale=transaction_scale,
+        laundering_intensity=laundering_intensity,
+        banks=raw.get("banks", []),
+        fx_rates=raw.get("fx_rates", {}),
         role_descriptions=raw.get("role_descriptions", {}),
         daily_schedules=raw.get("daily_schedules", {}),
         knowledge_documents=knowledge_cfg.get("documents", []),
         knowledge_model_path=knowledge_cfg.get("model_path", "facebook/dpr-ctx_encoder-single-nq-base"),
         knowledge_device=knowledge_cfg.get("device"),
         risk_model=raw.get("risk_model", {}),
+        default_currency=raw.get("default_currency", "CNY"),
     )
 
 
