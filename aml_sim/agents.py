@@ -80,9 +80,13 @@ class ReasoningEngine:
         commonsense_block: str,
         plan_block: str | None = None,
         relationship_block: str | None = None,
+        affect_block: str | None = None,
+        policy_block: str | None = None,
     ) -> str:
         plan_section = f"Long-term plan:\n{plan_block}\n\n" if plan_block else ""
         relationship_section = f"Relationship context:\n{relationship_block}\n\n" if relationship_block else ""
+        affect_section = f"Affect and risk posture:\n{affect_block}\n\n" if affect_block else ""
+        policy_section = f"Active policies and rules:\n{policy_block}\n\n" if policy_block else ""
         prompt = (
             f"Role: {role}\n"
             "Context from personal memory:\n"
@@ -93,6 +97,8 @@ class ReasoningEngine:
             f"{commonsense_block}\n\n"
             f"{plan_section}"
             f"{relationship_section}"
+            f"{affect_section}"
+            f"{policy_section}"
             f"Query: {query}\n"
             "Respond with a concise decision and short justification."
         )
@@ -111,9 +117,32 @@ class Agent:
     knowledge_base: KnowledgeBase
     reasoner: ReasoningEngine = dataclasses.field(default_factory=ReasoningEngine)
     current_plan: str | None = None
+    mood: str = "calm"
+    risk_tolerance: float = 0.5
+    policy_context: str | None = None
 
-    def update_memory(self, entry: str) -> None:
-        self.memory.add(entry)
+    def update_memory(self, entry: str, event_type: str | None = None, importance: float | None = None) -> None:
+        self.memory.add(entry, event_type=event_type, importance=importance)
+        self.update_affect_from_event(event_type, entry)
+
+    def update_affect_from_event(self, event_type: str | None, description: str) -> None:
+        """Nudge mood and risk tolerance based on notable events."""
+
+        if not event_type:
+            return
+        lowered = f"{event_type} {description}".lower()
+        if any(keyword in lowered for keyword in ["sar", "investigation", "flag", "regulator"]):
+            self.mood = "nervous"
+            self.risk_tolerance = max(0.15, self.risk_tolerance - 0.1)
+        if any(keyword in lowered for keyword in ["profit", "windfall", "successful", "high margin"]):
+            self.mood = "aggressive"
+            self.risk_tolerance = min(1.0, self.risk_tolerance + 0.1)
+        if any(keyword in lowered for keyword in ["gossip", "rumor", "warning", "monitored"]):
+            self.mood = "alert"
+            self.risk_tolerance = max(0.2, self.risk_tolerance - 0.05)
+
+    def affect_block(self) -> str:
+        return f"Mood: {self.mood}; Risk tolerance (0=avoidant,1=reckless): {self.risk_tolerance:.2f}"
 
     def retrieve_context(self, query: str, plan_context: str | None = None, relationship_context: str | None = None) -> str:
         memory_hits = self.memory.retrieve(query)
@@ -123,6 +152,8 @@ class Agent:
         memory_block = "\n".join(memory_hits) or "(no direct matches, showing recent history)"
         knowledge_block = "\n".join(kb_texts) or "(no retrieved cases)"
         plan_block = plan_context or self.current_plan or "\n".join(self.memory.important_snapshot())
+        policy_block = self.policy_context or ""
+        salient_block = self.memory.salient_summary(top_k=4)
         return self.reasoner.run(
             self.role,
             query,
@@ -131,6 +162,8 @@ class Agent:
             commonsense,
             plan_block=plan_block,
             relationship_block=relationship_context,
+            affect_block=f"{self.affect_block()}\nSalient cues:\n{salient_block}",
+            policy_block=policy_block,
         )
 
     @property
