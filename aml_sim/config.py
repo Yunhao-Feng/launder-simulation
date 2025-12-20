@@ -34,6 +34,9 @@ class SimulationConfig:
     knowledge_device: str | None
     risk_model: Dict[str, Any]
     default_currency: str
+    enable_reflection: bool
+    enable_social: bool
+    social_interactions_per_day: int
 
 
 def _load_raw_config(path: str | Path) -> Dict[str, Any]:
@@ -81,6 +84,9 @@ def load_config(path: str | Path) -> SimulationConfig:
         knowledge_device=knowledge_cfg.get("device"),
         risk_model=raw.get("risk_model", {}),
         default_currency=raw.get("default_currency", "CNY"),
+        enable_reflection=bool(raw.get("enable_reflection", True)),
+        enable_social=bool(raw.get("enable_social", True)),
+        social_interactions_per_day=int(raw.get("social_interactions_per_day", 10)),
     )
 
 

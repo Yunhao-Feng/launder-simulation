@@ -59,6 +59,8 @@ class MemoryEntry:
 
 
 class AgentMemory:
+    """Vector-backed episodic memory for agents."""
+
     def __init__(
         self,
         max_items: int = 500,
@@ -71,10 +73,21 @@ class AgentMemory:
         self.embedder = embedder or DPRTextEmbedder()
 
     def add(self, entry: str) -> None:
+        """Add a generic memory entry with embedding and timestamp."""
+
         embedding = self.embedder.embed(entry)
         self.entries.append(MemoryEntry(text=entry, timestamp=now_timestamp(), embedding=embedding))
         if len(self.entries) > self.max_items:
             self.entries = self.entries[-self.max_items :]
+
+    def add_important(self, entry: str) -> None:
+        """Add an important memory with a stronger retrieval signal."""
+
+        marked = f"[IMPORTANT] {entry}"
+        # Duplicate the entry to bias retrieval toward long-term plans and reflections.
+        self.add(marked)
+        if len(self.entries) < self.max_items:
+            self.add(marked)
 
     def retrieve(self, query: str, top_k: int = 5) -> List[str]:
         if not self.entries:
@@ -91,6 +104,12 @@ class AgentMemory:
 
     def commonsense_snapshot(self, topics: Optional[Sequence[str]] = None) -> str:
         return self.commonsense.retrieve(topics)
+
+    def important_snapshot(self, top_k: int = 3) -> List[str]:
+        """Return the most recent high-importance memories."""
+
+        important_entries = [e for e in self.entries if e.text.startswith("[IMPORTANT]")]
+        return [f"[{e.timestamp}] {e.text}" for e in important_entries[-top_k:]]
 
 
 @dataclasses.dataclass(**dataclass_options)
