@@ -119,14 +119,20 @@ class Agent:
     current_plan: str | None = None
     mood: str = "calm"
     risk_tolerance: float = 0.5
+    fatigue: float = 0.1
+    stress: float = 0.2
+    confidence: float = 0.5
     policy_context: str | None = None
 
     def update_memory(self, entry: str, event_type: str | None = None, importance: float | None = None) -> None:
         self.memory.add(entry, event_type=event_type, importance=importance)
         self.update_affect_from_event(event_type, entry)
 
+    def _clamp(self, value: float, low: float = 0.0, high: float = 1.0) -> float:
+        return max(low, min(high, value))
+
     def update_affect_from_event(self, event_type: str | None, description: str) -> None:
-        """Nudge mood and risk tolerance based on notable events."""
+        """Nudge mood, risk tolerance, and additional affective states based on notable events."""
 
         if not event_type:
             return
@@ -134,15 +140,34 @@ class Agent:
         if any(keyword in lowered for keyword in ["sar", "investigation", "flag", "regulator"]):
             self.mood = "nervous"
             self.risk_tolerance = max(0.15, self.risk_tolerance - 0.1)
+            self.stress = self._clamp(self.stress + 0.15)
+            self.confidence = self._clamp(self.confidence - 0.05)
         if any(keyword in lowered for keyword in ["profit", "windfall", "successful", "high margin"]):
             self.mood = "aggressive"
             self.risk_tolerance = min(1.0, self.risk_tolerance + 0.1)
+            self.confidence = self._clamp(self.confidence + 0.1)
+            self.stress = self._clamp(self.stress - 0.05)
         if any(keyword in lowered for keyword in ["gossip", "rumor", "warning", "monitored"]):
             self.mood = "alert"
             self.risk_tolerance = max(0.2, self.risk_tolerance - 0.05)
+            self.stress = self._clamp(self.stress + 0.05)
+        if any(keyword in lowered for keyword in ["long shift", "sequence", "batch", "busy", "deposit", "p2p", "bill"]):
+            self.fatigue = self._clamp(self.fatigue + 0.08)
+        if "reflection" in lowered or "rest" in lowered:
+            self.fatigue = self._clamp(self.fatigue - 0.05)
+            self.stress = self._clamp(self.stress - 0.05)
+        if any(keyword in lowered for keyword in ["promotion", "praise", "plan"]):
+            self.confidence = self._clamp(self.confidence + 0.05)
+        if any(keyword in lowered for keyword in ["penalty", "loss", "rejected"]):
+            self.confidence = self._clamp(self.confidence - 0.08)
+            self.stress = self._clamp(self.stress + 0.05)
 
     def affect_block(self) -> str:
-        return f"Mood: {self.mood}; Risk tolerance (0=avoidant,1=reckless): {self.risk_tolerance:.2f}"
+        return (
+            f"Mood: {self.mood}; "
+            f"Risk tolerance (0=avoidant,1=reckless): {self.risk_tolerance:.2f}; "
+            f"Fatigue: {self.fatigue:.2f}; Stress: {self.stress:.2f}; Confidence: {self.confidence:.2f}"
+        )
 
     def retrieve_context(self, query: str, plan_context: str | None = None, relationship_context: str | None = None) -> str:
         memory_hits = self.memory.retrieve(query)

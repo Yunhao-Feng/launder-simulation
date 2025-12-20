@@ -106,10 +106,14 @@
     }
   },
   "calibration": {
-    "payroll": {"type": "lognormal", "mean": 8.5, "sigma": 0.3, "scale": 1.0},
-    "revenue": {"type": "lognormal", "mean": 9.2, "sigma": 0.35, "scale": 1.0},
-    "salary": {"type": "lognormal", "mean": 10.0, "sigma": 0.25, "scale": 1.0},
-    "deposit": {"type": "lognormal", "mean": 11.3, "sigma": 0.55, "scale": 1.0},
+    "amounts": {
+      "payroll": {"type": "lognormal", "mean": 8.5, "sigma": 0.3, "scale": 1.0},
+      "revenue": {"type": "lognormal", "mean": 9.2, "sigma": 0.35, "scale": 1.0},
+      "salary": {"type": "lognormal", "mean": 10.0, "sigma": 0.25, "scale": 1.0},
+      "deposit": {"type": "lognormal", "mean": 11.3, "sigma": 0.55, "scale": 1.0},
+      "p2p": {"type": "histogram", "bins": [200, 1000, 4000, 7000], "weights": [0.55, 0.3, 0.15]},
+      "bill": {"type": "histogram", "bins": [500, 2000, 5000], "weights": [0.7, 0.3]}
+    },
     "channel_frequencies": {
       "ach": 0.35,
       "wire": 0.18,

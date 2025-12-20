@@ -15,6 +15,7 @@ from .agents import (
     ResidentAgent,
 )
 from .config import SimulationConfig, load_config
+from .monitor import generate_daily_summary
 from .simulation import Simulation
 
 __all__ = [
@@ -32,5 +33,6 @@ __all__ = [
     "ResidentAgent",
     "Simulation",
     "SimulationConfig",
+    "generate_daily_summary",
     "load_config",
 ]
