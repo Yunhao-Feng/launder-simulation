@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import random
 from datetime import datetime, timedelta
-from typing import Dict, List, Tuple
+from typing import Dict, List, Optional, Tuple
 
 from .agents import (
     AccountProfile,
@@ -56,6 +56,10 @@ class Simulation:
             if len(k) == 2
         }
         self.default_currency = config.default_currency
+        self.available_currencies: List[str] = sorted(
+            {self.default_currency, *(c for bank in self.banks.values() for c in bank.supported_currencies)}
+        )
+        self.pattern_generation = config.pattern_generation or {"enabled": False}
         self.embedder = DPRTextEmbedder(model_path=config.knowledge_model_path, device=config.knowledge_device)
         self.knowledge_base = KnowledgeBase.from_config(
             config.knowledge_documents,
@@ -90,11 +94,35 @@ class Simulation:
         self.companies: List[Company] = self._create_companies()
         self.company_staff = self._assign_staff_to_companies()
 
-        self.currencies = self.default_currency
         self._index_agents()
 
     def _memory(self, max_items: int = 500) -> AgentMemory:
         return AgentMemory(max_items=max_items, embedder=self.embedder)
+
+    def _account_state(self, account_id: str):
+        return self.event_recorder.accounts.get(account_id) or self.event_recorder.register_account(account_id)
+
+    def _account_currency(self, account_id: str) -> str:
+        return self._account_state(account_id).currency or self.default_currency
+
+    def _choose_channel(self, tx_type: str, is_money_laundering: bool = False) -> str:
+        """Pick a realistic payment rail for the given transaction context."""
+
+        laundering_channels = ["wire", "crypto", "cash", "ach"]
+        normal_channels = ["ach", "credit_card", "cheque", "cash"]
+        if tx_type in {"deposit", "placement"}:
+            return "cash"
+        if tx_type in {"salary", "payroll", "revenue", "supplier_payment"}:
+            return "ach"
+        if tx_type in {"bill", "p2p", "spend"}:
+            return random.choice(["credit_card", "ach", "crypto"])
+        if is_money_laundering:
+            return random.choice(laundering_channels)
+        return random.choice(normal_channels)
+
+    def _seed_illicit_balance(self, account_id: str, amount: float) -> None:
+        acct = self._account_state(account_id)
+        acct.illicit_balance += float(amount)
     
     def _scale_count(self, value: int) -> int:
         scaled = int(value * self.population_scale)
@@ -222,6 +250,7 @@ class Simulation:
         total_real = self._scale_count(self.config.num_real_companies)
         total_shell = self._scale_count(self.config.num_shell_companies)
 
+        # Real operating companies
         for idx in range(1, total_real + 1):
             account = self._register_account(f"company-real-{idx}")
             owner_agent = random.choice(self.business_owners)
@@ -236,8 +265,10 @@ class Simulation:
             )
             companies.append(company)
 
+        # Shells with seed illicit balances
         for idx in range(1, total_shell + 1):
-            account = self._register_account(f"company-shell-{idx}", illicit_balance=20000 * self.laundering_intensity)
+            illicit_seed = 20000 * self.laundering_intensity or 10000
+            account = self._register_account(f"company-shell-{idx}", illicit_balance=illicit_seed)
             owner_choice = random.choice(companies) if companies else random.choice(self.business_owners)
             owner_entity = (
                 owner_choice
@@ -255,6 +286,19 @@ class Simulation:
             )
             companies.append(company)
 
+        # Enrich ownership graph depth by chaining companies through shell layers
+        if companies:
+            max_depth = max(1, int(self.config.ownership_graph_depth))
+            for company in companies:
+                current_depth = len([o for o in company.owners if isinstance(o, Company)])
+                while current_depth < max_depth:
+                    potential_owner = random.choice(companies)
+                    if potential_owner.id == company.id or potential_owner in company.owners:
+                        break
+                    company.owners.append(potential_owner)
+                    current_depth += 1
+
+        # Supplier and customer graphs
         for company in companies:
             degree = max(1, self.config.supplier_graph_degree)
             partners = [c for c in companies if c.id != company.id]
@@ -300,6 +344,36 @@ class Simulation:
     def _apply_relationship_contexts(self) -> None:
         for agent in self.all_agents:
             setattr(agent, "relationship_context", self._relationship_summary(agent.id))
+
+    def _record_transaction(
+        self,
+        sender_account: str,
+        receiver_account: str,
+        amount: float,
+        tx_type: str,
+        is_money_laundering: bool,
+        ml_typology: Optional[str],
+        ml_pattern: Optional[str] = None,
+        pattern_scheme_id: str | int | None = None,
+        currency: Optional[str] = None,
+        current_day: Optional[int] = None,
+        channel: Optional[str] = None,
+    ):
+        tx_currency = currency or self._account_currency(sender_account)
+        tx_channel = channel or self._choose_channel(tx_type, is_money_laundering)
+        return self.event_recorder.record_transaction(
+            sender_account=sender_account,
+            receiver_account=receiver_account,
+            amount=amount,
+            currency=tx_currency,
+            tx_type=tx_type,
+            channel=tx_channel,
+            is_money_laundering=is_money_laundering,
+            ml_typology=ml_typology,
+            ml_pattern=ml_pattern,
+            pattern_scheme_id=pattern_scheme_id,
+            current_day=current_day,
+        )
     
     def run(self) -> None:
         start_date = datetime(2024, 1, 1)
@@ -332,6 +406,9 @@ class Simulation:
             desc = accountant.design_typology(typology)
             self.event_recorder.record_event(accountant.id, accountant.role, "typology", desc)
 
+        # Canonical laundering pattern injection
+        self._generate_laundering_patterns(day_index)
+
         # Placement stage
         transfer_cfg = schedules.get("mastermind_transfers", {})
         max_amount = transfer_cfg.get("max_amount", 500000)
@@ -351,11 +428,10 @@ class Simulation:
             courier_desc = self.courier.move_parcels(len(parcels), sum(parcels))
             self.event_recorder.record_event(self.courier.id, self.courier.role, "pickup", courier_desc, target_id=self.mastermind.id)
 
-            courier_tx = self.event_recorder.record_transaction(
+            courier_tx = self._record_transaction(
                 sender_account=self.mastermind.primary_account,
                 receiver_account=self.courier.primary_account,
                 amount=sum(parcels),
-                currency=self.currencies,
                 tx_type="placement",
                 is_money_laundering=True,
                 ml_typology="placement",
@@ -367,11 +443,10 @@ class Simulation:
             receivers = self.business_owners + self.mules
             random.shuffle(receivers)
             for parcel, receiver in zip(parcels, receivers):
-                tx = self.event_recorder.record_transaction(
+                tx = self._record_transaction(
                     sender_account=self.courier.primary_account,
                     receiver_account=receiver.primary_account,
                     amount=parcel,
-                    currency=self.currencies,
                     tx_type="placement",
                     is_money_laundering=True,
                     ml_typology="placement",
@@ -393,11 +468,10 @@ class Simulation:
             rule = intake_cfg.get(getattr(owner, "business_type", ""), {})
             if weekday in rule.get("days", []):
                 amount = rule.get("amount", 20000)
-                tx = self.event_recorder.record_transaction(
+                tx = self._record_transaction(
                     sender_account=self.mastermind.primary_account,
                     receiver_account=owner.primary_account,
                     amount=amount,
-                    currency=self.currencies,
                     tx_type="layering",
                     is_money_laundering=True,
                     ml_typology="business_layering",
@@ -420,11 +494,10 @@ class Simulation:
                 customer = random.choice(company.customers)
                 sender_account = customer.accounts[0] if isinstance(customer, Person) else (customer.accounts[0] if customer.accounts else company_account)
                 amount = random.randint(3000, 12000)
-                tx = self.event_recorder.record_transaction(
+                tx = self._record_transaction(
                     sender_account=sender_account,
                     receiver_account=company_account,
                     amount=amount,
-                    currency=self.currencies,
                     tx_type="revenue",
                     is_money_laundering=company.is_shell and random.random() < shell_bias,
                     ml_typology="customer_inflow" if company.is_shell else None,
@@ -437,11 +510,10 @@ class Simulation:
                 if random.random() > self.transaction_scale:
                     continue
                 amount = random.randint(4000, 15000)
-                tx = self.event_recorder.record_transaction(
+                tx = self._record_transaction(
                     sender_account=company_account,
                     receiver_account=supplier.accounts[0] if supplier.accounts else company_account,
                     amount=amount,
-                    currency=self.currencies,
                     tx_type="supplier_payment",
                     is_money_laundering=company.is_shell and random.random() < shell_bias,
                     ml_typology="supplier_layering" if company.is_shell else None,
@@ -452,11 +524,10 @@ class Simulation:
             # Payroll to staff
             for emp in self.company_staff.get(company.id, []):
                 pay_amount = random.randint(3000, 8000)
-                tx = self.event_recorder.record_transaction(
+                tx = self._record_transaction(
                     sender_account=company_account,
                     receiver_account=emp.primary_account,
                     amount=pay_amount,
-                    currency=self.currencies,
                     tx_type="payroll",
                     is_money_laundering=company.is_shell and random.random() < shell_bias,
                     ml_typology="inflated_payroll" if company.is_shell else None,
@@ -480,11 +551,10 @@ class Simulation:
                 mule.redistribute(payments)
                 for amt in payments:
                     target = random.choice(self.residents + self.business_owners)
-                    tx = self.event_recorder.record_transaction(
+                    tx = self._record_transaction(
                         sender_account=mule.primary_account,
                         receiver_account=target.primary_account,
                         amount=amt,
-                        currency=self.currencies,
                         tx_type="layering",
                         is_money_laundering=True,
                         ml_typology="mule_scatter",
@@ -498,11 +568,10 @@ class Simulation:
             payroll_amount = random.randint(5000, 15000)
             desc = owner.integrate_funds(payroll_amount)
             self.event_recorder.record_event(owner.id, owner.role, "integration", desc)
-            tx = self.event_recorder.record_transaction(
+            tx = self._record_transaction(
                 sender_account=owner.primary_account,
                 receiver_account=random.choice(self.residents).primary_account,
                 amount=payroll_amount,
-                currency=self.currencies,
                 tx_type="integration",
                 is_money_laundering=False,
                 ml_typology=None,
@@ -515,11 +584,10 @@ class Simulation:
             for resident in self.residents:
                 salary = random.randint(20000, 50000)
                 resident.normal_activity(salary)
-                tx = self.event_recorder.record_transaction(
+                tx = self._record_transaction(
                     sender_account=self.back_office.primary_account,
                     receiver_account=resident.primary_account,
                     amount=salary,
-                    currency=self.currencies,
                     tx_type="salary",
                     is_money_laundering=False,
                     ml_typology=None,
@@ -534,11 +602,10 @@ class Simulation:
             amount = random.randint(2000, 140000)
             teller = random.choice(self.bank_tellers)
             is_launder = isinstance(depositor, (BusinessOwnerAgent, MuleAgent, MastermindAgent))
-            tx = self.event_recorder.record_transaction(
+            tx = self._record_transaction(
                 sender_account=depositor.primary_account,
                 receiver_account=teller.primary_account,
                 amount=amount,
-                currency=self.currencies,
                 tx_type="deposit",
                 is_money_laundering=is_launder,
                 ml_typology="structuring" if is_launder and amount > 90000 else None,
@@ -555,11 +622,10 @@ class Simulation:
         for resident in self.residents:
             spend = random.randint(500, 3000)
             resident.normal_activity(spend)
-            tx = self.event_recorder.record_transaction(
+            tx = self._record_transaction(
                 sender_account=resident.primary_account,
                 receiver_account=random.choice(self.business_owners).primary_account,
                 amount=spend,
-                currency=self.currencies,
                 tx_type="spend",
                 is_money_laundering=False,
                 ml_typology=None,
@@ -577,11 +643,10 @@ class Simulation:
             if sender.id == receiver.id:
                 receiver = random.choice(self.residents)
             amount = random.randint(200, 5000)
-            tx = self.event_recorder.record_transaction(
+            tx = self._record_transaction(
                 sender_account=sender.primary_account,
                 receiver_account=receiver.primary_account,
                 amount=amount,
-                currency=self.currencies,
                 tx_type="p2p",
                 is_money_laundering=False,
                 ml_typology=None,
@@ -594,11 +659,10 @@ class Simulation:
             payer = random.choice(self.residents)
             facility = random.choice(public_accounts)
             amount = random.randint(800, 4000)
-            tx = self.event_recorder.record_transaction(
+            tx = self._record_transaction(
                 sender_account=payer.primary_account,
                 receiver_account=facility,
                 amount=amount,
-                currency=self.currencies,
                 tx_type="bill",
                 is_money_laundering=False,
                 ml_typology=None,
@@ -610,12 +674,16 @@ class Simulation:
         # Social interactions between agents
         if self.config.enable_social and self.all_agents:
             interactions = max(1, int(self.config.social_interactions_per_day * self.population_scale))
+            rumor_bank = random.choice(list(self.banks.values()))
+            rumor_currency = random.choice(self.available_currencies)
+            rumor_pattern = random.choice(ALL_LAUNDERING_PATTERNS)
             for _ in range(interactions):
                 if len(self.all_agents) < 2:
                     break
                 agent_a, agent_b = random.sample(self.all_agents, 2)
                 context_str = self._relationship_summary(agent_a.id)
-                dialogue = generate_social_event(agent_a, agent_b, context_str)
+                rumor = f"{rumor_bank.name} is tightening checks on {rumor_currency} {rumor_pattern} flows"
+                dialogue = generate_social_event(agent_a, agent_b, context_str, rumor=rumor)
                 self.event_recorder.record_event(agent_a.id, agent_a.role, "social", dialogue, target_id=agent_b.id)
                 update_relationship(agent_a, agent_b, dialogue, self.relationship_graph)
 
@@ -629,7 +697,8 @@ class Simulation:
                 events = by_agent.get(agent.id, [])
                 if not events:
                     continue
-                summary = "; ".join(events)
+                salient = [e for e in events if any(key in e for key in ["sar", "ml_pattern", "deposit", "layering"])]
+                summary = "; ".join(salient or events[-5:])
                 reflection = agent.reflect(summary)
                 plan = agent.update_long_term_plan(reflection)
                 self.event_recorder.record_event(agent.id, agent.role, "reflection", reflection)
@@ -638,7 +707,15 @@ class Simulation:
         self._apply_relationship_contexts()
 
     def _evaluate_risk(self, tx) -> None:
-        score = self.risk_model.score_transaction(tx.amount, tx.is_money_laundering, tx.illicit_amount, tx.illicit_fraction)
+        score = self.risk_model.score_transaction(
+            tx.amount,
+            tx.is_money_laundering,
+            tx.illicit_amount,
+            tx.illicit_fraction,
+            cross_bank=tx.cross_bank,
+            cross_currency=tx.cross_currency,
+            channel=tx.channel,
+        )
         if score >= self.config.risk_threshold:
             regulator = random.choice(self.regulators)
             note = regulator.open_investigation(tx.tx_id, score)
@@ -656,6 +733,143 @@ class Simulation:
         if allocations:
             allocations[0] = round(allocations[0] + remainder, 2)
         return allocations
+
+    def _generate_laundering_patterns(self, day_index: int) -> None:
+        cfg = self.pattern_generation or {}
+        if not cfg.get("enabled", False):
+            return
+        per_day = max(1, int(cfg.get("per_day", 1) * self.transaction_scale))
+        base_amount = float(cfg.get("base_amount", 120000)) * max(self.laundering_intensity, 0.05)
+
+        account_pool = list(
+            {
+                acct.account_id
+                for agent in self.all_agents
+                for acct in getattr(agent, "accounts", [])
+            }
+            | {acct for company in self.companies for acct in company.accounts}
+        )
+        if len(account_pool) < 6:
+            return
+
+        patterns = ALL_LAUNDERING_PATTERNS
+        random.shuffle(account_pool)
+
+        for idx in range(per_day):
+            pattern_name = patterns[(idx + day_index) % len(patterns)]
+            scheme_id = f"day{day_index}-{pattern_name}-{idx}"
+            amount = base_amount * random.uniform(0.5, 1.2)
+
+            def sample_accounts(count: int) -> List[str]:
+                return random.sample(account_pool, min(count, len(account_pool)))
+
+            try:
+                if pattern_name == FAN_OUT:
+                    controller, *recipients = sample_accounts(4)
+                    self._seed_illicit_balance(controller, amount)
+                    tx_ids = self._generate_fan_out_pattern(
+                        controller,
+                        recipients,
+                        amount,
+                        currency=self._account_currency(controller),
+                        scheme_id=scheme_id,
+                        current_day=day_index,
+                    )
+                elif pattern_name == FAN_IN:
+                    sink, *sources = sample_accounts(4)
+                    self._seed_illicit_balance(sources[0], amount)
+                    tx_ids = self._generate_fan_in_pattern(
+                        sources,
+                        sink,
+                        amount,
+                        currency=self._account_currency(sources[0]),
+                        scheme_id=scheme_id,
+                        current_day=day_index,
+                    )
+                elif pattern_name == GATHER_SCATTER:
+                    gather, src_a, src_b, dst_a, dst_b = sample_accounts(5)
+                    self._seed_illicit_balance(src_a, amount / 2)
+                    self._seed_illicit_balance(src_b, amount / 2)
+                    tx_ids = self._generate_gather_scatter_pattern(
+                        gather,
+                        [src_a, src_b],
+                        [dst_a, dst_b],
+                        amount,
+                        currency=self._account_currency(gather),
+                        scheme_id=scheme_id,
+                        current_day=day_index,
+                    )
+                elif pattern_name == SCATTER_GATHER:
+                    source, sink, *intermediates = sample_accounts(4)
+                    self._seed_illicit_balance(source, amount)
+                    tx_ids = self._generate_scatter_gather_pattern(
+                        source,
+                        sink,
+                        intermediates[:2],
+                        amount,
+                        currency=self._account_currency(source),
+                        scheme_id=scheme_id,
+                        current_day=day_index,
+                    )
+                elif pattern_name == SIMPLE_CYCLE:
+                    nodes = sample_accounts(4)
+                    self._seed_illicit_balance(nodes[0], amount)
+                    tx_ids = self._generate_simple_cycle_pattern(
+                        nodes,
+                        amount,
+                        currency=self._account_currency(nodes[0]),
+                        scheme_id=scheme_id,
+                        current_day=day_index,
+                    )
+                elif pattern_name == RANDOM:
+                    path = sample_accounts(5)
+                    self._seed_illicit_balance(path[0], amount)
+                    tx_ids = self._generate_random_pattern(
+                        path,
+                        amount,
+                        currency=self._account_currency(path[0]),
+                        scheme_id=scheme_id,
+                        current_day=day_index,
+                    )
+                elif pattern_name == BIPARTITE:
+                    senders = sample_accounts(3)
+                    receivers = sample_accounts(3)
+                    self._seed_illicit_balance(senders[0], amount)
+                    tx_ids = self._generate_bipartite_pattern(
+                        senders,
+                        receivers,
+                        amount,
+                        currency=self._account_currency(senders[0]),
+                        scheme_id=scheme_id,
+                        current_day=day_index,
+                    )
+                elif pattern_name == STACK:
+                    layer1 = sample_accounts(2)
+                    layer2 = sample_accounts(2)
+                    layer3 = sample_accounts(2)
+                    self._seed_illicit_balance(layer1[0], amount)
+                    tx_ids = self._generate_stack_pattern(
+                        [layer1, layer2, layer3],
+                        amount,
+                        currency=self._account_currency(layer1[0]),
+                        scheme_id=scheme_id,
+                        current_day=day_index,
+                    )
+                else:
+                    continue
+                self.event_recorder.record_event(
+                    self.mastermind.id,
+                    self.mastermind.role,
+                    "ml_pattern",
+                    f"Generated {pattern_name} scheme {scheme_id} with tx {tx_ids}",
+                )
+            except ValueError as exc:
+                self.event_recorder.record_event(
+                    self.mastermind.id,
+                    self.mastermind.role,
+                    "ml_pattern_error",
+                    f"Failed {pattern_name}: {exc}",
+                )
     
     def _generate_fan_out_pattern(
         self,
@@ -664,6 +878,7 @@ class Simulation:
         total_amount: float,
         currency: str,
         scheme_id: str,
+        current_day: Optional[int] = None,
     ) -> List[int]:
         """
         Generate a fan-out pattern where a single source splits funds to >=2 recipients.
@@ -679,7 +894,7 @@ class Simulation:
         allocations = self._split_amount(total_amount, len(recipient_accounts))
         tx_ids: List[int] = []
         for receiver, amount in zip(recipient_accounts, allocations):
-            tx = self.event_recorder.record_transaction(
+            tx = self._record_transaction(
                 sender_account=controller_account,
                 receiver_account=receiver,
                 amount=amount,
@@ -689,6 +904,7 @@ class Simulation:
                 ml_typology=FAN_OUT,
                 ml_pattern=FAN_OUT,
                 pattern_scheme_id=scheme_id,
+                current_day=current_day,
             )
             tx_ids.append(tx.tx_id)
         return tx_ids
@@ -700,6 +916,7 @@ class Simulation:
         total_amount: float,
         currency: str,
         scheme_id: str,
+        current_day: Optional[int] = None,
     ) -> List[int]:
         """
         Generate a fan-in pattern where multiple sources consolidate into a sink.
@@ -711,7 +928,7 @@ class Simulation:
         allocations = self._split_amount(total_amount, len(source_accounts))
         tx_ids: List[int] = []
         for sender, amount in zip(source_accounts, allocations):
-            tx = self.event_recorder.record_transaction(
+            tx = self._record_transaction(
                 sender_account=sender,
                 receiver_account=sink_account,
                 amount=amount,
@@ -721,6 +938,7 @@ class Simulation:
                 ml_typology=FAN_IN,
                 ml_pattern=FAN_IN,
                 pattern_scheme_id=scheme_id,
+                current_day=current_day,
             )
             tx_ids.append(tx.tx_id)
         return tx_ids
@@ -733,6 +951,7 @@ class Simulation:
         total_amount: float,
         currency: str,
         scheme_id: str,
+        current_day: Optional[int] = None,
     ) -> List[int]:
         """
         Generate a gather-scatter pattern where one hub gathers then redistributes.
@@ -746,7 +965,7 @@ class Simulation:
         tx_ids: List[int] = []
 
         for sender, amount in zip(source_accounts, incoming_amounts):
-            tx = self.event_recorder.record_transaction(
+            tx = self._record_transaction(
                 sender_account=sender,
                 receiver_account=gather_account,
                 amount=amount,
@@ -756,11 +975,12 @@ class Simulation:
                 ml_typology=GATHER_SCATTER,
                 ml_pattern=GATHER_SCATTER,
                 pattern_scheme_id=scheme_id,
+                current_day=current_day,
             )
             tx_ids.append(tx.tx_id)
 
         for receiver, amount in zip(recipient_accounts, outgoing_amounts):
-            tx = self.event_recorder.record_transaction(
+            tx = self._record_transaction(
                 sender_account=gather_account,
                 receiver_account=receiver,
                 amount=amount,
@@ -770,6 +990,7 @@ class Simulation:
                 ml_typology=GATHER_SCATTER,
                 ml_pattern=GATHER_SCATTER,
                 pattern_scheme_id=scheme_id,
+                current_day=current_day,
             )
             tx_ids.append(tx.tx_id)
         return tx_ids
@@ -782,6 +1003,7 @@ class Simulation:
         total_amount: float,
         currency: str,
         scheme_id: str,
+        current_day: Optional[int] = None,
     ) -> List[int]:
         """
         Generate a scatter-gather pattern using shared intermediates between source and sink.
@@ -795,7 +1017,7 @@ class Simulation:
         tx_ids: List[int] = []
 
         for receiver, amount in zip(intermediate_accounts, scatter_amounts):
-            tx = self.event_recorder.record_transaction(
+            tx = self._record_transaction(
                 sender_account=source_account,
                 receiver_account=receiver,
                 amount=amount,
@@ -805,11 +1027,12 @@ class Simulation:
                 ml_typology=SCATTER_GATHER,
                 ml_pattern=SCATTER_GATHER,
                 pattern_scheme_id=scheme_id,
+                current_day=current_day,
             )
             tx_ids.append(tx.tx_id)
 
         for sender, amount in zip(intermediate_accounts, gather_amounts):
-            tx = self.event_recorder.record_transaction(
+            tx = self._record_transaction(
                 sender_account=sender,
                 receiver_account=sink_account,
                 amount=amount,
@@ -819,6 +1042,7 @@ class Simulation:
                 ml_typology=SCATTER_GATHER,
                 ml_pattern=SCATTER_GATHER,
                 pattern_scheme_id=scheme_id,
+                current_day=current_day,
             )
             tx_ids.append(tx.tx_id)
         return tx_ids
@@ -829,6 +1053,7 @@ class Simulation:
         total_amount: float,
         currency: str,
         scheme_id: str,
+        current_day: Optional[int] = None,
     ) -> List[int]:
         """
         Generate a simple directed cycle across distinct accounts.
@@ -841,7 +1066,7 @@ class Simulation:
         tx_ids: List[int] = []
         for idx, sender in enumerate(accounts):
             receiver = accounts[(idx + 1) % len(accounts)]
-            tx = self.event_recorder.record_transaction(
+            tx = self._record_transaction(
                 sender_account=sender,
                 receiver_account=receiver,
                 amount=allocations[idx],
@@ -851,6 +1076,7 @@ class Simulation:
                 ml_typology=SIMPLE_CYCLE,
                 ml_pattern=SIMPLE_CYCLE,
                 pattern_scheme_id=scheme_id,
+                current_day=current_day,
             )
             tx_ids.append(tx.tx_id)
         return tx_ids
@@ -861,6 +1087,7 @@ class Simulation:
         total_amount: float,
         currency: str,
         scheme_id: str,
+        current_day: Optional[int] = None,
     ) -> List[int]:
         """
         Generate a random-walk-style chain without returning to the origin.
@@ -872,7 +1099,7 @@ class Simulation:
         allocations = self._split_amount(total_amount, len(account_path) - 1)
         tx_ids: List[int] = []
         for idx in range(len(account_path) - 1):
-            tx = self.event_recorder.record_transaction(
+            tx = self._record_transaction(
                 sender_account=account_path[idx],
                 receiver_account=account_path[idx + 1],
                 amount=allocations[idx],
@@ -882,6 +1109,7 @@ class Simulation:
                 ml_typology=RANDOM,
                 ml_pattern=RANDOM,
                 pattern_scheme_id=scheme_id,
+                current_day=current_day,
             )
             tx_ids.append(tx.tx_id)
         return tx_ids
@@ -893,6 +1121,7 @@ class Simulation:
         total_amount: float,
         currency: str,
         scheme_id: str,
+        current_day: Optional[int] = None,
     ) -> List[int]:
         """
         Generate a bipartite pattern with edges only from senders to receivers.
@@ -907,7 +1136,7 @@ class Simulation:
         for sender in sender_accounts:
             for receiver in receiver_accounts:
                 amount = allocations.pop(0)
-                tx = self.event_recorder.record_transaction(
+                tx = self._record_transaction(
                     sender_account=sender,
                     receiver_account=receiver,
                     amount=amount,
@@ -917,6 +1146,7 @@ class Simulation:
                     ml_typology=BIPARTITE,
                     ml_pattern=BIPARTITE,
                     pattern_scheme_id=scheme_id,
+                    current_day=current_day,
                 )
                 tx_ids.append(tx.tx_id)
         return tx_ids
@@ -927,6 +1157,7 @@ class Simulation:
         total_amount: float,
         currency: str,
         scheme_id: str,
+        current_day: Optional[int] = None,
     ) -> List[int]:
         """
         Generate a stacked multi-layer bipartite structure across successive layers.
@@ -947,7 +1178,7 @@ class Simulation:
             for sender in src_layer:
                 for receiver in dst_layer:
                     amount = allocations.pop(0)
-                    tx = self.event_recorder.record_transaction(
+                    tx = self._record_transaction(
                         sender_account=sender,
                         receiver_account=receiver,
                         amount=amount,
@@ -957,6 +1188,7 @@ class Simulation:
                         ml_typology=STACK,
                         ml_pattern=STACK,
                         pattern_scheme_id=scheme_id,
+                        current_day=current_day,
                     )
                     tx_ids.append(tx.tx_id)
         return tx_ids

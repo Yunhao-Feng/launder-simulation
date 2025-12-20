@@ -29,6 +29,11 @@
     "laundering_amount_threshold": 80000,
     "high_risk_amount": 100000
   },
+  "pattern_generation": {
+    "enabled": true,
+    "per_day": 2,
+    "base_amount": 150000
+  },
   "role_descriptions": {
     "boss": "Directs laundering strategy and communicates indirectly with the mastermind.",
     "mastermind": "Receives criminal funds and parcels them to collaborators.",

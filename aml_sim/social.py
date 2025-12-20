@@ -12,12 +12,14 @@ from typing import Dict
 from .agents import Agent
 
 
-def generate_social_event(agent_a: Agent, agent_b: Agent, context_str: str) -> str:
+def generate_social_event(agent_a: Agent, agent_b: Agent, context_str: str, rumor: str | None = None) -> str:
     """Generate a brief dialogue between two agents using their reasoning engines."""
 
+    rumor_line = f"Fresh rumor: {rumor}. " if rumor else ""
     query = (
         "You are roleplaying a short conversation with another character. "
         f"Your partner is {agent_b.role} ({agent_b.id}). Context: {context_str}. "
+        f"{rumor_line}"
         "Share actionable gossip about banking scrutiny or laundering tactics."
     )
     return agent_a.retrieve_context(query)
@@ -42,3 +44,9 @@ def update_relationship(
     if random.random() < 0.1:
         agent_a.memory.add_important(f"Relationship boost with {agent_b.id}: consider using their channels.")
         agent_b.memory.add_important(f"Relationship boost with {agent_a.id}: consider using their channels.")
+
+    # Strong ties can shift future banking or typology choices.
+    if graph_a[agent_b.id] > 0.4:
+        agent_a.memory.add_important(f"Trust {agent_b.id} for future typology choices; coordinate banks together.")
+    if graph_b[agent_a.id] > 0.4:
+        agent_b.memory.add_important(f"Trust {agent_a.id} for future typology choices; coordinate banks together.")
