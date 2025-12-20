@@ -130,12 +130,15 @@ class Transaction:
     sender_account: str
     receiver_account: str
     amount: float
+    channel: str
     clean_amount: float
     illicit_amount: float
     illicit_fraction: float
     currency: str
     fee_amount: float
     tx_type: str
+    cross_bank: bool
+    cross_currency: bool
     is_money_laundering: bool
     ml_typology: str | None
     ml_pattern: str | None
@@ -260,6 +263,7 @@ class EventRecorder:
         amount: float,
         currency: str,
         tx_type: str,
+        channel: str | None,
         is_money_laundering: bool,
         ml_typology: str | None,
         ml_pattern: str | None = None,
@@ -278,7 +282,7 @@ class EventRecorder:
         sender_bank = self.banks.get(sender_state.bank_id)
         receiver_bank = self.banks.get(receiver_state.bank_id)
         cross_bank = sender_state.bank_id != receiver_state.bank_id if (sender_bank and receiver_bank) else False
-        fee_amount = float(amount) * sender_bank.transfer_fee if sender_bank else 0.0
+        fee_amount = float(amount) * sender_bank.transfer_fee if (sender_bank and cross_bank) else 0.0
         settlement_day = current_day
         if cross_bank and sender_bank:
             settlement_day = (current_day or 0) + sender_bank.interbank_delay_days
@@ -303,12 +307,15 @@ class EventRecorder:
             sender_account=sender_account,
             receiver_account=receiver_account,
             amount=float(amount),
+            channel=channel or "wire",
             clean_amount=clean_amount,
             illicit_amount=illicit_amount,
             illicit_fraction=illicit_fraction,
             currency=tx_currency,
             fee_amount=fee_amount,
             tx_type=tx_type,
+            cross_bank=cross_bank,
+            cross_currency=sender_state.currency != receiver_state.currency,
             is_money_laundering=is_money_laundering,
             ml_typology=ml_typology,
             ml_pattern=ml_pattern,
@@ -357,12 +364,15 @@ class EventRecorder:
                     "sender_account",
                     "receiver_account",
                     "amount",
+                    "channel",
                     "clean_amount",
                     "illicit_amount",
                     "illicit_fraction",
                     "currency",
                     "fee_amount",
                     "tx_type",
+                    "cross_bank",
+                    "cross_currency",
                     "is_money_laundering",
                     "ml_typology",
                     "ml_pattern",
@@ -378,12 +388,15 @@ class EventRecorder:
                         tx.sender_account,
                         tx.receiver_account,
                         tx.amount,
+                        tx.channel,
                         tx.clean_amount,
                         tx.illicit_amount,
                         tx.illicit_fraction,
                         tx.currency,
                         tx.fee_amount,
                         tx.tx_type,
+                        int(tx.cross_bank),
+                        int(tx.cross_currency),
                         int(tx.is_money_laundering),
                         tx.ml_typology or "",
                         tx.ml_pattern or "",

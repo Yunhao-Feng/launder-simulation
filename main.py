@@ -4,6 +4,7 @@ import argparse
 from pathlib import Path
 
 from aml_sim.config import ensure_output_dir, load_config
+from aml_sim import export
 from aml_sim.simulation import Simulation
 
 
@@ -23,6 +24,10 @@ def main() -> None:
     output_dir = ensure_output_dir(args.output)
     simulation.event_recorder.export_logs(output_dir / "behaviour_log.csv")
     simulation.event_recorder.export_transactions(output_dir / "transactions.csv")
+    export.export_accounts(simulation, output_dir / "accounts.csv")
+    export.export_entities(simulation, output_dir / "entities.csv")
+    export.export_edges(simulation, output_dir / "graph_edges.csv")
+    export.export_graph_features(simulation, output_dir / "graph_features.csv")
     print(f"Simulation complete. Logs at {output_dir}")
 
 

@@ -34,6 +34,8 @@ class SimulationConfig:
     knowledge_device: str | None
     risk_model: Dict[str, Any]
     default_currency: str
+    pattern_generation: Dict[str, Any]
+    intensity_presets: Dict[str, Dict[str, float]]
     enable_reflection: bool
     enable_social: bool
     social_interactions_per_day: int
@@ -51,14 +53,17 @@ def load_config(path: str | Path) -> SimulationConfig:
     raw = _load_raw_config(path)
     knowledge_cfg = raw.get("knowledge", {})
     scenario = raw.get("scenario", "LI")
-    population_scale = float(raw.get("population_scale", 1.0))
-    transaction_scale = float(raw.get("transaction_scale", 1.0))
-    laundering_intensity = float(
-        raw.get(
-            "laundering_intensity",
-            0.08 if scenario == "HI" else 0.001 if scenario == "LI" else 0.01,
-        )
-    )
+    default_presets = {
+        "HI": {"population_scale": 3.0, "transaction_scale": 4.0, "laundering_intensity": 0.08},
+        "LI": {"population_scale": 0.6, "transaction_scale": 0.8, "laundering_intensity": 0.001},
+        "PROTO": {"population_scale": 0.2, "transaction_scale": 0.3, "laundering_intensity": 0.0005},
+    }
+    custom_presets = raw.get("intensity_presets", {})
+    presets = {**default_presets, **custom_presets}
+    preset_values = presets.get(scenario.upper(), {})
+    population_scale = float(raw.get("population_scale", preset_values.get("population_scale", 1.0)))
+    transaction_scale = float(raw.get("transaction_scale", preset_values.get("transaction_scale", 1.0)))
+    laundering_intensity = float(raw.get("laundering_intensity", preset_values.get("laundering_intensity", 0.01)))
     return SimulationConfig(
         seed=raw.get("seed", 0),
         simulation_days=raw.get("simulation_days", 1),
@@ -84,6 +89,8 @@ def load_config(path: str | Path) -> SimulationConfig:
         knowledge_device=knowledge_cfg.get("device"),
         risk_model=raw.get("risk_model", {}),
         default_currency=raw.get("default_currency", "CNY"),
+        pattern_generation=raw.get("pattern_generation", {"enabled": True, "per_day": 1, "base_amount": 120000}),
+        intensity_presets=presets,
         enable_reflection=bool(raw.get("enable_reflection", True)),
         enable_social=bool(raw.get("enable_social", True)),
         social_interactions_per_day=int(raw.get("social_interactions_per_day", 10)),

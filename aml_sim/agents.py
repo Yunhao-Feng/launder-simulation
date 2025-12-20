@@ -5,7 +5,10 @@ import importlib.util
 import os
 from typing import List, Optional
 
-from openai import OpenAI
+try:  # OpenAI is optional for deterministic offline runs.
+    from openai import OpenAI
+except Exception:  # pragma: no cover - fallback when SDK is unavailable.
+    OpenAI = None
 
 from .knowledge import KnowledgeBase
 from .memory import AgentMemory
@@ -107,6 +110,7 @@ class Agent:
     memory: AgentMemory
     knowledge_base: KnowledgeBase
     reasoner: ReasoningEngine = dataclasses.field(default_factory=ReasoningEngine)
+    current_plan: str | None = None
 
     def update_memory(self, entry: str) -> None:
         self.memory.add(entry)
@@ -118,7 +122,7 @@ class Agent:
         kb_texts = [f"{doc.title}: {doc.text}" for doc in kb_docs]
         memory_block = "\n".join(memory_hits) or "(no direct matches, showing recent history)"
         knowledge_block = "\n".join(kb_texts) or "(no retrieved cases)"
-        plan_block = plan_context or "\n".join(self.memory.important_snapshot())
+        plan_block = plan_context or self.current_plan or "\n".join(self.memory.important_snapshot())
         return self.reasoner.run(
             self.role,
             query,
@@ -134,7 +138,7 @@ class Agent:
         return self.accounts[0].account_id if self.accounts else ""
     
     def decide_next_action(self, query: str, observation: str | None = None, relationship_context: str | None = None) -> str:
-        plan_context = "\n".join(self.memory.important_snapshot())
+        plan_context = self.current_plan or "\n".join(self.memory.important_snapshot())
         relationship_context = relationship_context or getattr(self, "relationship_context", None)
         decision = self.retrieve_context(query, plan_context=plan_context, relationship_context=relationship_context)
         memo_line = observation or query
@@ -161,6 +165,7 @@ class Agent:
         )
         plan = self.retrieve_context(plan_prompt)
         self.memory.add_important(f"Plan: {plan}")
+        self.current_plan = plan
         return plan
 
 
