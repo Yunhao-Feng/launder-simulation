@@ -195,6 +195,7 @@ class Transaction:
     sender_account: str
     receiver_account: str
     amount: float
+    event_day: int | None
     channel: str
     clean_amount: float
     illicit_amount: float
@@ -372,6 +373,7 @@ class EventRecorder:
             sender_account=sender_account,
             receiver_account=receiver_account,
             amount=float(amount),
+            event_day=current_day,
             channel=channel or "wire",
             clean_amount=clean_amount,
             illicit_amount=illicit_amount,

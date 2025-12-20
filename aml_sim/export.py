@@ -106,6 +106,7 @@ def export_edges(sim, path) -> None:
                 "sender_account",
                 "receiver_account",
                 "amount",
+                "event_day",
                 "clean_amount",
                 "illicit_amount",
                 "illicit_fraction",
@@ -120,6 +121,7 @@ def export_edges(sim, path) -> None:
                 "ml_typology",
                 "pattern_scheme_id",
                 "timestamp_day",
+                "settlement_day",
             ]
         )
         for tx in sim.event_recorder.transactions:
@@ -130,6 +132,7 @@ def export_edges(sim, path) -> None:
                     tx.sender_account,
                     tx.receiver_account,
                     tx.amount,
+                    "" if tx.event_day is None else tx.event_day,
                     tx.clean_amount,
                     tx.illicit_amount,
                     tx.illicit_fraction,
@@ -143,6 +146,7 @@ def export_edges(sim, path) -> None:
                     tx.ml_pattern or (tx.ml_typology or ""),
                     tx.ml_typology or "",
                     tx.pattern_scheme_id or "",
+                    tx.event_day if tx.event_day is not None else (tx.settlement_day if tx.settlement_day is not None else ""),
                     tx.settlement_day if tx.settlement_day is not None else "",
                 ]
             )

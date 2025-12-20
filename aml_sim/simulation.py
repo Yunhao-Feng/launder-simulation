@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import random
 from datetime import datetime, timedelta
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from .agents import (
     Agent,
@@ -26,7 +26,7 @@ from .entities import Company, Person
 from .knowledge import DPRTextEmbedder, KnowledgeBase
 from .memory import AgentMemory, EventRecorder
 from .social import diffuse_information, generate_recruitment_event, generate_social_event, update_relationship
-from . import interface
+from . import interface, monitor
 from .patterns import (
     ALL_LAUNDERING_PATTERNS,
     BIPARTITE,
@@ -78,8 +78,18 @@ class Simulation:
         self.affect_config = config.affect_config or {}
         self.calibration = config.calibration or {}
         self.evaluation = config.evaluation or {}
+        raw_amount_cfg = self.calibration.get("amounts") or self.calibration.get("amount_distributions")
+        if not raw_amount_cfg:
+            raw_amount_cfg = {k: v for k, v in self.calibration.items() if isinstance(v, dict) and v.get("type")}
+        self.amount_calibrations = raw_amount_cfg or {}
         self.channel_frequency = self.calibration.get("channel_frequencies", {})
         self.relationship_graph: Dict[str, Dict[str, float]] = {}
+        self.daily_risk_scores: Dict[int, List[float]] = {}
+        self.daily_alerts: Dict[int, int] = {}
+        self.daily_transaction_ids: Dict[int, List[int]] = {}
+        self.daily_affect_snapshots: Dict[int, Dict[str, Dict[str, Dict[str, float] | str]]] = {}
+        self.daily_summaries: Dict[int, Dict[str, object]] = {}
+        self.current_day_index: int = 0
 
         self.boss: BossAgent = self._create_boss()
         self.mastermind: MastermindAgent = self._create_mastermind()
@@ -106,16 +116,23 @@ class Simulation:
     def _memory(self, max_items: int = 500) -> AgentMemory:
         return AgentMemory(max_items=max_items, embedder=self.embedder)
 
-    def _affect_for_role(self, role_key: str) -> Tuple[str, float]:
-        """Return initial mood and risk tolerance for a role with safe defaults."""
+    def _affect_for_role(self, role_key: str) -> Dict[str, Any]:
+        """Return initial affective state for a role with safe defaults."""
 
         default_mood = self.affect_config.get("default_mood", "calm")
         default_risk = float(self.affect_config.get("default_risk_tolerance", 0.5))
+        default_fatigue = float(self.affect_config.get("default_fatigue", 0.1))
+        default_stress = float(self.affect_config.get("default_stress", 0.2))
+        default_confidence = float(self.affect_config.get("default_confidence", 0.5))
         overrides = self.affect_config.get("role_overrides", {}) or {}
         role_cfg = overrides.get(role_key) or overrides.get(role_key.replace(" ", "_"), {})
-        mood = role_cfg.get("mood", default_mood)
-        risk = float(role_cfg.get("risk_tolerance", default_risk))
-        return mood, risk
+        return {
+            "mood": role_cfg.get("mood", default_mood),
+            "risk_tolerance": float(role_cfg.get("risk_tolerance", default_risk)),
+            "fatigue": float(role_cfg.get("fatigue", default_fatigue)),
+            "stress": float(role_cfg.get("stress", default_stress)),
+            "confidence": float(role_cfg.get("confidence", default_confidence)),
+        }
 
     def _account_state(self, account_id: str):
         return self.event_recorder.accounts.get(account_id) or self.event_recorder.register_account(account_id)
@@ -124,17 +141,40 @@ class Simulation:
         return self._account_state(account_id).currency or self.default_currency
 
     def _sample_amount(self, key: str, fallback_range: Tuple[int, int]) -> float:
-        """Sample an amount using calibrated distributions when available."""
+        """Sample an amount using calibrated distributions when available.
 
-        cfg = self.calibration.get(key, {})
-        if cfg and cfg.get("type") == "lognormal":
-            mean = float(cfg.get("mean", 1.0))
-            sigma = float(cfg.get("sigma", 0.5))
-            scale = float(cfg.get("scale", 1.0))
-            sampled = random.lognormvariate(mean, sigma) * scale
-            lower, upper = fallback_range
-            return max(lower, min(sampled, upper * 2))
+        Calibrations can be provided in ``config.calibration.amounts`` (or
+        ``amount_distributions``) with entries such as:
+
+        {"payroll": {"type": "histogram", "bins": [0, 5_000, 10_000], "weights": [0.7, 0.3]}}
+        {"p2p": {"type": "lognormal", "mean": 7.2, "sigma": 0.35, "scale": 1.0}}
+
+        If no calibrated distribution is present, the simulator falls back to
+        uniform sampling over ``fallback_range``.
+        """
+
+        cfg = self.amount_calibrations.get(key) or self.calibration.get(key, {})
         lower, upper = fallback_range
+        if cfg:
+            dist_type = cfg.get("type", "").lower()
+            if dist_type == "lognormal":
+                mean = float(cfg.get("mean", 1.0))
+                sigma = float(cfg.get("sigma", 0.5))
+                scale = float(cfg.get("scale", 1.0))
+                sampled = random.lognormvariate(mean, sigma) * scale
+                return max(lower, min(sampled, upper * 2))
+            if dist_type == "histogram":
+                bins = cfg.get("bins", [])
+                weights = cfg.get("weights") or cfg.get("frequency") or []
+                if bins and weights and len(bins) in {len(weights), len(weights) + 1}:
+                    # Ensure bin edges length = weights + 1
+                    if len(bins) == len(weights):
+                        bins = list(bins) + [bins[-1]]
+                    total = sum(weights) or 1.0
+                    probs = [w / total for w in weights]
+                    idx = random.choices(range(len(probs)), weights=probs, k=1)[0]
+                    left, right = bins[idx], bins[idx + 1]
+                    return random.uniform(left, right)
         return random.uniform(lower, upper)
 
     def _risk_scaled_amount(self, base_amount: float, agent: Agent | None) -> float:
@@ -155,7 +195,18 @@ class Simulation:
         if tx_type in {"bill", "p2p", "spend"}:
             return random.choice(["credit_card", "ach", "crypto"])
         if self.channel_frequency:
-            weights = dict(self.channel_frequency)
+            weights: Dict[str, float] = {}
+            if all(isinstance(v, (int, float)) for v in self.channel_frequency.values()):
+                weights = dict(self.channel_frequency)
+            else:
+                tx_specific = self.channel_frequency.get(tx_type)
+                default_block = self.channel_frequency.get("default")
+                if isinstance(tx_specific, dict):
+                    weights = tx_specific
+                elif isinstance(default_block, dict):
+                    weights = default_block
+                else:
+                    weights = {k: v for k, v in self.channel_frequency.items() if isinstance(v, (int, float))}
             if is_money_laundering:
                 weights["crypto"] = weights.get("crypto", 0.1) * 1.6
                 weights["cash"] = weights.get("cash", 0.1) * 1.4
@@ -204,33 +255,69 @@ class Simulation:
 
     def _create_boss(self) -> BossAgent:
         mem, accounts = self._base_agent(1, "boss")
-        mood, risk = self._affect_for_role("boss")
-        return BossAgent("boss-1", "Money Laundering Boss", accounts, mem, self.knowledge_base, mood=mood, risk_tolerance=risk)
+        affect = self._affect_for_role("boss")
+        return BossAgent(
+            "boss-1",
+            "Money Laundering Boss",
+            accounts,
+            mem,
+            self.knowledge_base,
+            mood=affect["mood"],
+            risk_tolerance=affect["risk_tolerance"],
+            fatigue=affect["fatigue"],
+            stress=affect["stress"],
+            confidence=affect["confidence"],
+        )
 
     def _create_mastermind(self) -> MastermindAgent:
         mem, accounts = self._base_agent(1, "mastermind")
-        mood, risk = self._affect_for_role("mastermind")
-        return MastermindAgent("mastermind-1", "Money Shop Mastermind", accounts, mem, self.knowledge_base, mood=mood, risk_tolerance=risk)
+        affect = self._affect_for_role("mastermind")
+        return MastermindAgent(
+            "mastermind-1",
+            "Money Shop Mastermind",
+            accounts,
+            mem,
+            self.knowledge_base,
+            mood=affect["mood"],
+            risk_tolerance=affect["risk_tolerance"],
+            fatigue=affect["fatigue"],
+            stress=affect["stress"],
+            confidence=affect["confidence"],
+        )
 
     def _create_courier(self) -> CourierAgent:
         mem, accounts = self._base_agent(1, "courier")
-        mood, risk = self._affect_for_role("courier")
-        return CourierAgent("courier-1", "Courier", accounts, mem, self.knowledge_base, mood=mood, risk_tolerance=risk)
+        affect = self._affect_for_role("courier")
+        return CourierAgent(
+            "courier-1",
+            "Courier",
+            accounts,
+            mem,
+            self.knowledge_base,
+            mood=affect["mood"],
+            risk_tolerance=affect["risk_tolerance"],
+            fatigue=affect["fatigue"],
+            stress=affect["stress"],
+            confidence=affect["confidence"],
+        )
 
     def _create_business_owners(self) -> List[BusinessOwnerAgent]:
         owners = []
         business_names = ["restaurant", "car_shop", "e_shop"]
         for idx, btype in enumerate(business_names, 1):
             mem, accounts = self._base_agent(idx, f"owner-{btype}")
-            mood, risk = self._affect_for_role("business_owner")
+            affect = self._affect_for_role("business_owner")
             owner = BusinessOwnerAgent(
                 f"owner-{idx}",
                 "Front Business Owner",
                 accounts,
                 mem,
                 self.knowledge_base,
-                mood=mood,
-                risk_tolerance=risk,
+                mood=affect["mood"],
+                risk_tolerance=affect["risk_tolerance"],
+                fatigue=affect["fatigue"],
+                stress=affect["stress"],
+                confidence=affect["confidence"],
             )
             owner.business_type = btype
             owners.append(owner)
@@ -240,7 +327,7 @@ class Simulation:
         accountants = []
         for idx in range(1, 4):
             mem, accounts = self._base_agent(idx, "accountant")
-            mood, risk = self._affect_for_role("accountant")
+            affect = self._affect_for_role("accountant")
             accountants.append(
                 AccountantAgent(
                     f"accountant-{idx}",
@@ -248,8 +335,11 @@ class Simulation:
                     accounts,
                     mem,
                     self.knowledge_base,
-                    mood=mood,
-                    risk_tolerance=risk,
+                    mood=affect["mood"],
+                    risk_tolerance=affect["risk_tolerance"],
+                    fatigue=affect["fatigue"],
+                    stress=affect["stress"],
+                    confidence=affect["confidence"],
                 )
             )
         return accountants
@@ -258,8 +348,21 @@ class Simulation:
         employees: List[EmployeeAgent] = []
         for idx in range(1, self._scale_count(self.config.num_employees) + 1):
             mem, accounts = self._base_agent(idx, "employee")
-            mood, risk = self._affect_for_role("employee")
-            employees.append(EmployeeAgent(f"employee-{idx}", "Employee", accounts, mem, self.knowledge_base, mood=mood, risk_tolerance=risk))
+            affect = self._affect_for_role("employee")
+            employees.append(
+                EmployeeAgent(
+                    f"employee-{idx}",
+                    "Employee",
+                    accounts,
+                    mem,
+                    self.knowledge_base,
+                    mood=affect["mood"],
+                    risk_tolerance=affect["risk_tolerance"],
+                    fatigue=affect["fatigue"],
+                    stress=affect["stress"],
+                    confidence=affect["confidence"],
+                )
+            )
         return employees
 
     def _create_mules(self) -> List[MuleAgent]:
@@ -267,7 +370,7 @@ class Simulation:
         for idx in range(1, self._scale_count(self.config.num_mules) + 1):
             accounts = [f"mule-{idx}-acct-1", f"mule-{idx}-acct-2"]
             mem = self._memory(max_items=300)
-            mood, risk = self._affect_for_role("mule")
+            affect = self._affect_for_role("mule")
             mules.append(
                 MuleAgent(
                     f"mule-{idx}",
@@ -275,8 +378,11 @@ class Simulation:
                     [self._register_account(acc) for acc in accounts],
                     mem,
                     self.knowledge_base,
-                    mood=mood,
-                    risk_tolerance=risk,
+                    mood=affect["mood"],
+                    risk_tolerance=affect["risk_tolerance"],
+                    fatigue=affect["fatigue"],
+                    stress=affect["stress"],
+                    confidence=affect["confidence"],
                 )
             )
         return mules
@@ -285,29 +391,79 @@ class Simulation:
         residents = []
         for idx in range(1, self._scale_count(self.config.num_residents) + 1):
             mem, accounts = self._base_agent(idx, "resident")
-            mood, risk = self._affect_for_role("resident")
-            residents.append(ResidentAgent(f"resident-{idx}", "Resident", accounts, mem, self.knowledge_base, mood=mood, risk_tolerance=risk))
+            affect = self._affect_for_role("resident")
+            residents.append(
+                ResidentAgent(
+                    f"resident-{idx}",
+                    "Resident",
+                    accounts,
+                    mem,
+                    self.knowledge_base,
+                    mood=affect["mood"],
+                    risk_tolerance=affect["risk_tolerance"],
+                    fatigue=affect["fatigue"],
+                    stress=affect["stress"],
+                    confidence=affect["confidence"],
+                )
+            )
         return residents
 
     def _create_tellers(self) -> List[BankTellerAgent]:
         tellers = []
         for idx in range(1, 3):
             mem, accounts = self._base_agent(idx, "teller")
-            mood, risk = self._affect_for_role("bank_teller")
-            tellers.append(BankTellerAgent(f"teller-{idx}", "Bank Teller", accounts, mem, self.knowledge_base, mood=mood, risk_tolerance=risk))
+            affect = self._affect_for_role("bank_teller")
+            tellers.append(
+                BankTellerAgent(
+                    f"teller-{idx}",
+                    "Bank Teller",
+                    accounts,
+                    mem,
+                    self.knowledge_base,
+                    mood=affect["mood"],
+                    risk_tolerance=affect["risk_tolerance"],
+                    fatigue=affect["fatigue"],
+                    stress=affect["stress"],
+                    confidence=affect["confidence"],
+                )
+            )
         return tellers
 
     def _create_back_office(self) -> BackOfficeAgent:
         mem, accounts = self._base_agent(1, "back-office")
-        mood, risk = self._affect_for_role("back_office")
-        return BackOfficeAgent("back-office-1", "Back Office Operator", accounts, mem, self.knowledge_base, mood=mood, risk_tolerance=risk)
+        affect = self._affect_for_role("back_office")
+        return BackOfficeAgent(
+            "back-office-1",
+            "Back Office Operator",
+            accounts,
+            mem,
+            self.knowledge_base,
+            mood=affect["mood"],
+            risk_tolerance=affect["risk_tolerance"],
+            fatigue=affect["fatigue"],
+            stress=affect["stress"],
+            confidence=affect["confidence"],
+        )
 
     def _create_regulators(self) -> List[RegulatorAgent]:
         regulators = []
         for idx in range(1, self._scale_count(self.config.num_regulators) + 1):
             mem, accounts = self._base_agent(idx, "regulator")
-            mood, risk = self._affect_for_role("regulator")
-            regulators.append(RegulatorAgent(f"regulator-{idx}", "Regulator", accounts, mem, self.knowledge_base, mood=mood, risk_tolerance=risk))
+            affect = self._affect_for_role("regulator")
+            regulators.append(
+                RegulatorAgent(
+                    f"regulator-{idx}",
+                    "Regulator",
+                    accounts,
+                    mem,
+                    self.knowledge_base,
+                    mood=affect["mood"],
+                    risk_tolerance=affect["risk_tolerance"],
+                    fatigue=affect["fatigue"],
+                    stress=affect["stress"],
+                    confidence=affect["confidence"],
+                )
+            )
         return regulators
     
     def _create_companies(self) -> List[Company]:
@@ -411,6 +567,22 @@ class Simulation:
             setattr(agent, "relationship_context", self._relationship_summary(agent.id))
             self._update_policy_context(agent)
 
+    def _capture_affect_snapshot(self, day_index: int, label: str) -> None:
+        """Record a snapshot of all agents' affective states for monitoring."""
+
+        snapshot = {
+            agent.id: {
+                "mood": agent.mood,
+                "risk_tolerance": agent.risk_tolerance,
+                "fatigue": getattr(agent, "fatigue", 0.0),
+                "stress": getattr(agent, "stress", 0.0),
+                "confidence": getattr(agent, "confidence", 0.0),
+            }
+            for agent in self.all_agents
+        }
+        day_record = self.daily_affect_snapshots.setdefault(day_index, {})
+        day_record[label] = snapshot
+
     def _update_policy_context(self, agent: Agent) -> None:
         policy_lines = [self.risk_model.active_policy_summary(), *self.policy_directives]
         agent.policy_context = "\n".join([line for line in policy_lines if line])
@@ -452,7 +624,7 @@ class Simulation:
     ):
         tx_currency = currency or self._account_currency(sender_account)
         tx_channel = channel or self._choose_channel(tx_type, is_money_laundering)
-        return self.event_recorder.record_transaction(
+        tx = self.event_recorder.record_transaction(
             sender_account=sender_account,
             receiver_account=receiver_account,
             amount=amount,
@@ -465,6 +637,9 @@ class Simulation:
             pattern_scheme_id=pattern_scheme_id,
             current_day=current_day,
         )
+        day_key = tx.event_day if tx.event_day is not None else self.current_day_index
+        self.daily_transaction_ids.setdefault(day_key, []).append(tx.tx_id)
+        return tx
     
     def run(self) -> None:
         start_date = datetime(2024, 1, 1)
@@ -483,11 +658,13 @@ class Simulation:
         return reply
     
     def _run_day(self, current_date: datetime, day_index: int) -> None:
+        self.current_day_index = day_index
         weekday = current_date.strftime("%A")
         schedules = self.config.daily_schedules
         self.event_recorder.release_settlements(day_index)
         day_start_idx = len(self.event_recorder.logs)
         self._apply_relationship_contexts()
+        self._capture_affect_snapshot(day_index, "start")
 
         # Strategy and planning by boss and accountants
         boss_plan = self.boss.plan_strategy()
@@ -803,7 +980,9 @@ class Simulation:
                 self._log_event(agent, "reflection", reflection, importance=1.5)
                 self._log_event(agent, "plan", plan, importance=1.4)
 
+        self._capture_affect_snapshot(day_index, "end")
         self._apply_relationship_contexts()
+        self.daily_summaries[day_index] = monitor.generate_daily_summary(self, day_index)
 
     def _evaluate_risk(self, tx) -> None:
         score = self.risk_model.score_transaction(
@@ -816,10 +995,26 @@ class Simulation:
             channel=tx.channel,
             tx_type=tx.tx_type,
         )
+        day_index = tx.event_day if getattr(tx, "event_day", None) is not None else self.current_day_index
+        self.daily_risk_scores.setdefault(day_index, []).append(score)
         if score >= self.risk_model.threshold:
+            self.daily_alerts[day_index] = self.daily_alerts.get(day_index, 0) + 1
             regulator = random.choice(self.regulators)
             note = regulator.open_investigation(tx.tx_id, score)
             self._log_event(regulator, "sar", note, target_id=str(tx.tx_id), importance=2.0)
+
+    def get_daily_summary(self, day_index: Optional[int] = None, as_json: bool = False):
+        """Return monitoring summary for a given simulation day.
+
+        If ``day_index`` is not provided, the most recent computed day is used.
+        Set ``as_json=True`` to receive a structured dictionary instead of text.
+        """
+
+        target_day = day_index if day_index is not None else (max(self.daily_summaries.keys()) if self.daily_summaries else 0)
+        summary = self.daily_summaries.get(target_day) or monitor.generate_daily_summary(self, target_day)
+        if as_json:
+            return summary
+        return summary.get("summary_text", str(summary))
     
     def _split_amount(self, total_amount: float, parts: int) -> List[float]:
         """Split ``total_amount`` into ``parts`` positive values that sum to the original."""
