@@ -68,7 +68,18 @@ class ReasoningEngine:
             summary_lines.append(" - Continue normal operations while logging observations for compliance review.")
         return "\n".join(summary_lines)
 
-    def run(self, role: str, query: str, memory_block: str, knowledge_block: str, commonsense_block: str) -> str:
+    def run(
+        self,
+        role: str,
+        query: str,
+        memory_block: str,
+        knowledge_block: str,
+        commonsense_block: str,
+        plan_block: str | None = None,
+        relationship_block: str | None = None,
+    ) -> str:
+        plan_section = f"Long-term plan:\n{plan_block}\n\n" if plan_block else ""
+        relationship_section = f"Relationship context:\n{relationship_block}\n\n" if relationship_block else ""
         prompt = (
             f"Role: {role}\n"
             "Context from personal memory:\n"
@@ -77,6 +88,8 @@ class ReasoningEngine:
             f"{knowledge_block}\n\n"
             "Commonsense AML heuristics:\n"
             f"{commonsense_block}\n\n"
+            f"{plan_section}"
+            f"{relationship_section}"
             f"Query: {query}\n"
             "Respond with a concise decision and short justification."
         )
@@ -98,24 +111,57 @@ class Agent:
     def update_memory(self, entry: str) -> None:
         self.memory.add(entry)
 
-    def retrieve_context(self, query: str) -> str:
+    def retrieve_context(self, query: str, plan_context: str | None = None, relationship_context: str | None = None) -> str:
         memory_hits = self.memory.retrieve(query)
         commonsense = self.memory.commonsense_snapshot()
         kb_docs = self.knowledge_base.query(query)
         kb_texts = [f"{doc.title}: {doc.text}" for doc in kb_docs]
         memory_block = "\n".join(memory_hits) or "(no direct matches, showing recent history)"
         knowledge_block = "\n".join(kb_texts) or "(no retrieved cases)"
-        return self.reasoner.run(self.role, query, memory_block, knowledge_block, commonsense)
+        plan_block = plan_context or "\n".join(self.memory.important_snapshot())
+        return self.reasoner.run(
+            self.role,
+            query,
+            memory_block,
+            knowledge_block,
+            commonsense,
+            plan_block=plan_block,
+            relationship_block=relationship_context,
+        )
 
     @property
     def primary_account(self) -> str:
         return self.accounts[0].account_id if self.accounts else ""
     
-    def decide_next_action(self, query: str, observation: str | None = None) -> str:
-        decision = self.retrieve_context(query)
+    def decide_next_action(self, query: str, observation: str | None = None, relationship_context: str | None = None) -> str:
+        plan_context = "\n".join(self.memory.important_snapshot())
+        relationship_context = relationship_context or getattr(self, "relationship_context", None)
+        decision = self.retrieve_context(query, plan_context=plan_context, relationship_context=relationship_context)
         memo_line = observation or query
         self.update_memory(f"{memo_line} | decision: {decision}")
         return decision
+
+    def reflect(self, day_summary: str) -> str:
+        """Produce an end-of-day reflection summarizing notable events."""
+
+        reflection_prompt = (
+            "Review today's events and extract key lessons for laundering risk and operational adjustments.\n"
+            f"Events: {day_summary}"
+        )
+        reflection = self.retrieve_context(reflection_prompt)
+        self.memory.add_important(f"Reflection: {reflection}")
+        return reflection
+
+    def update_long_term_plan(self, reflection: str) -> str:
+        """Generate or adjust medium-horizon goals based on the latest reflection."""
+
+        plan_prompt = (
+            "Using the reflection, propose strategic goals for the coming days. Focus on AML evasion or compliance duties. "
+            f"Reflection: {reflection}"
+        )
+        plan = self.retrieve_context(plan_prompt)
+        self.memory.add_important(f"Plan: {plan}")
+        return plan
 
 
 class BossAgent(Agent):

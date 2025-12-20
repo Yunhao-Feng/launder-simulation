@@ -24,6 +24,8 @@ from .detection import RiskModel
 from .entities import Company, Person
 from .knowledge import DPRTextEmbedder, KnowledgeBase
 from .memory import AgentMemory, EventRecorder
+from .social import generate_social_event, update_relationship
+from . import interface
 from .patterns import (
     ALL_LAUNDERING_PATTERNS,
     BIPARTITE,
@@ -67,6 +69,7 @@ class Simulation:
             default_currency=self.default_currency,
         )
         self.risk_model = RiskModel(config.risk_threshold, config.risk_model)
+        self.relationship_graph: Dict[str, Dict[str, float]] = {}
 
         self.boss: BossAgent = self._create_boss()
         self.mastermind: MastermindAgent = self._create_mastermind()
@@ -88,6 +91,7 @@ class Simulation:
         self.company_staff = self._assign_staff_to_companies()
 
         self.currencies = self.default_currency
+        self._index_agents()
 
     def _memory(self, max_items: int = 500) -> AgentMemory:
         return AgentMemory(max_items=max_items, embedder=self.embedder)
@@ -269,17 +273,56 @@ class Simulation:
             company = random.choice(self.companies)
             staff_map[company.id].append(emp)
         return staff_map
+
+    @property
+    def all_agents(self):
+        return (
+            [self.boss, self.mastermind, self.courier, self.back_office]
+            + self.accountants
+            + self.business_owners
+            + self.employees
+            + self.mules
+            + self.residents
+            + self.bank_tellers
+            + self.regulators
+        )
+
+    def _index_agents(self) -> None:
+        self.agents_by_id: Dict[str, object] = {agent.id: agent for agent in self.all_agents}
+
+    def _relationship_summary(self, agent_id: str) -> str:
+        links = self.relationship_graph.get(agent_id, {})
+        if not links:
+            return ""
+        sorted_links = sorted(links.items(), key=lambda kv: kv[1], reverse=True)[:3]
+        return ", ".join([f"{peer} (trust {score:.2f})" for peer, score in sorted_links])
+
+    def _apply_relationship_contexts(self) -> None:
+        for agent in self.all_agents:
+            setattr(agent, "relationship_context", self._relationship_summary(agent.id))
     
     def run(self) -> None:
         start_date = datetime(2024, 1, 1)
         for day_idx in range(self.config.simulation_days):
             current_date = start_date + timedelta(days=day_idx)
             self._run_day(current_date, day_idx)
+
+    def send_user_message(self, agent_id: str, text: str, user_role: str | None = None) -> str:
+        """Route a user-authored message to a specific agent."""
+
+        agent = self.agents_by_id.get(agent_id)
+        if not agent:
+            raise KeyError(f"Agent {agent_id} not found")
+        reply = interface.user_message(agent, text, user_role=user_role)
+        self.event_recorder.record_event(agent_id, agent.role, "interaction", reply)
+        return reply
     
     def _run_day(self, current_date: datetime, day_index: int) -> None:
         weekday = current_date.strftime("%A")
         schedules = self.config.daily_schedules
         self.event_recorder.release_settlements(day_index)
+        day_start_idx = len(self.event_recorder.logs)
+        self._apply_relationship_contexts()
 
         # Strategy and planning by boss and accountants
         boss_plan = self.boss.plan_strategy()
@@ -563,6 +606,36 @@ class Simulation:
             )
             self.event_recorder.record_event(payer.id, payer.role, "bill", f"Paid {amount} to {facility}")
             self._evaluate_risk(tx)
+
+        # Social interactions between agents
+        if self.config.enable_social and self.all_agents:
+            interactions = max(1, int(self.config.social_interactions_per_day * self.population_scale))
+            for _ in range(interactions):
+                if len(self.all_agents) < 2:
+                    break
+                agent_a, agent_b = random.sample(self.all_agents, 2)
+                context_str = self._relationship_summary(agent_a.id)
+                dialogue = generate_social_event(agent_a, agent_b, context_str)
+                self.event_recorder.record_event(agent_a.id, agent_a.role, "social", dialogue, target_id=agent_b.id)
+                update_relationship(agent_a, agent_b, dialogue, self.relationship_graph)
+
+        # End-of-day reflection and planning
+        if self.config.enable_reflection:
+            today_logs = self.event_recorder.logs[day_start_idx:]
+            by_agent: Dict[str, List[str]] = {}
+            for log in today_logs:
+                by_agent.setdefault(log.agent_id, []).append(f"{log.event_type}: {log.description}")
+            for agent in self.all_agents:
+                events = by_agent.get(agent.id, [])
+                if not events:
+                    continue
+                summary = "; ".join(events)
+                reflection = agent.reflect(summary)
+                plan = agent.update_long_term_plan(reflection)
+                self.event_recorder.record_event(agent.id, agent.role, "reflection", reflection)
+                self.event_recorder.record_event(agent.id, agent.role, "plan", plan)
+
+        self._apply_relationship_contexts()
 
     def _evaluate_risk(self, tx) -> None:
         score = self.risk_model.score_transaction(tx.amount, tx.is_money_laundering, tx.illicit_amount, tx.illicit_fraction)
