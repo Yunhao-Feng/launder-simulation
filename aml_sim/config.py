@@ -39,6 +39,9 @@ class SimulationConfig:
     enable_reflection: bool
     enable_social: bool
     social_interactions_per_day: int
+    affect_config: Dict[str, Any]
+    calibration: Dict[str, Any]
+    evaluation: Dict[str, Any]
 
 
 def _load_raw_config(path: str | Path) -> Dict[str, Any]:
@@ -94,6 +97,9 @@ def load_config(path: str | Path) -> SimulationConfig:
         enable_reflection=bool(raw.get("enable_reflection", True)),
         enable_social=bool(raw.get("enable_social", True)),
         social_interactions_per_day=int(raw.get("social_interactions_per_day", 10)),
+        affect_config=raw.get("agent_affect", {}),
+        calibration=raw.get("calibration", {}),
+        evaluation=raw.get("evaluation", {}),
     )
 
 

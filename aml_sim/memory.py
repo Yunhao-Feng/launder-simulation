@@ -56,6 +56,8 @@ class MemoryEntry:
     text: str
     timestamp: str
     embedding: torch.Tensor
+    importance: float
+    event_type: str | None = None
 
 
 class AgentMemory:
@@ -72,22 +74,64 @@ class AgentMemory:
         self.commonsense = commonsense or CommonSenseMemory()
         self.embedder = embedder or DPRTextEmbedder()
 
-    def add(self, entry: str) -> None:
-        """Add a generic memory entry with embedding and timestamp."""
+    def _compute_importance(self, entry: str, event_type: str | None = None) -> float:
+        """Heuristically score a memory using event type and content.
+
+        High-impact regulatory events (SAR, investigations) receive the strongest
+        weight, followed by financial windfalls, relationship shifts, and gossip.
+        """
+
+        base = 1.0
+        if event_type:
+            if event_type.lower() in {"sar", "investigation", "regulator_alert"}:
+                return 2.6
+            if event_type.lower() in {"plan", "reflection"}:
+                return 1.6
+            if event_type.lower() in {"parcel", "deposit", "business_intake"}:
+                base = 1.3
+        lowered = entry.lower()
+        if any(keyword in lowered for keyword in ["sar", "suspicious", "investigation", "flagged"]):
+            base = max(base, 2.2)
+        if any(keyword in lowered for keyword in ["profit", "windfall", "high margin", "big payout"]):
+            base = max(base, 1.7)
+        if any(keyword in lowered for keyword in ["rumor", "gossip", "tip", "warning"]):
+            base = max(base, 1.2)
+        if any(keyword in lowered for keyword in ["large deposit", "100000", "threshold"]):
+            base = max(base, 1.5)
+        return base
+
+    def _recency_weight(self, timestamp: str) -> float:
+        """Return a decay-based recency weight in [0.2, 1.0]."""
+
+        try:
+            ts = datetime.fromisoformat(timestamp)
+            delta_days = max((datetime.utcnow() - ts).days, 0)
+        except Exception:
+            delta_days = 0
+        return max(0.2, min(1.0, 1.0 / (1 + 0.2 * delta_days)))
+
+    def add(self, entry: str, event_type: str | None = None, importance: float | None = None) -> None:
+        """Add a generic memory entry with embedding, timestamp, and salience weight."""
 
         embedding = self.embedder.embed(entry)
-        self.entries.append(MemoryEntry(text=entry, timestamp=now_timestamp(), embedding=embedding))
+        scored_importance = importance if importance is not None else self._compute_importance(entry, event_type)
+        self.entries.append(
+            MemoryEntry(
+                text=entry,
+                timestamp=now_timestamp(),
+                embedding=embedding,
+                importance=float(scored_importance),
+                event_type=event_type,
+            )
+        )
         if len(self.entries) > self.max_items:
             self.entries = self.entries[-self.max_items :]
 
     def add_important(self, entry: str) -> None:
-        """Add an important memory with a stronger retrieval signal."""
+        """Add an important memory with an explicit salience boost."""
 
         marked = f"[IMPORTANT] {entry}"
-        # Duplicate the entry to bias retrieval toward long-term plans and reflections.
-        self.add(marked)
-        if len(self.entries) < self.max_items:
-            self.add(marked)
+        self.add(marked, importance=2.8, event_type="important")
 
     def retrieve(self, query: str, top_k: int = 5) -> List[str]:
         if not self.entries:
@@ -96,9 +140,10 @@ class AgentMemory:
         embeddings = torch.stack([e.embedding for e in self.entries], dim=0)
         sims = cosine_similarity(embeddings, query_vec.unsqueeze(0), dim=1)
 
-        # Recency bias: later entries (more recent) get a slight boost
-        recency_weights = torch.linspace(0.2, 1.0, steps=len(self.entries), device=sims.device)
-        weighted = sims * 0.8 + recency_weights * 0.2
+        recency_weights = torch.tensor([self._recency_weight(e.timestamp) for e in self.entries], device=sims.device)
+        importance_weights = torch.tensor([e.importance for e in self.entries], device=sims.device)
+        salience = importance_weights * recency_weights
+        weighted = sims * 0.6 + salience * 0.4
         top_indices = torch.argsort(weighted, descending=True)[:top_k]
         return [f"[{self.entries[i].timestamp}] {self.entries[i].text}" for i in top_indices.tolist()]
 
@@ -108,8 +153,28 @@ class AgentMemory:
     def important_snapshot(self, top_k: int = 3) -> List[str]:
         """Return the most recent high-importance memories."""
 
-        important_entries = [e for e in self.entries if e.text.startswith("[IMPORTANT]")]
-        return [f"[{e.timestamp}] {e.text}" for e in important_entries[-top_k:]]
+        important_entries = sorted(
+            [e for e in self.entries if e.text.startswith("[IMPORTANT]")],
+            key=lambda e: e.importance * self._recency_weight(e.timestamp),
+            reverse=True,
+        )
+        return [f"[{e.timestamp}] {e.text}" for e in important_entries[:top_k]]
+
+    def salient_summary(self, top_k: int = 5) -> str:
+        """Summarise the most salient memories for prompt conditioning."""
+
+        if not self.entries:
+            return "(no salient memories)"
+        scored = [
+            (e, e.importance * self._recency_weight(e.timestamp))
+            for e in self.entries
+        ]
+        scored.sort(key=lambda tup: tup[1], reverse=True)
+        lines = []
+        for entry, score in scored[:top_k]:
+            tag = entry.event_type or "memory"
+            lines.append(f"- [{tag} | {entry.timestamp} | salience {score:.2f}] {entry.text}")
+        return "\n".join(lines)
 
 
 @dataclasses.dataclass(**dataclass_options)
