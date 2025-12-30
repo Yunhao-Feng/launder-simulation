@@ -3,7 +3,7 @@ from __future__ import annotations
 import dataclasses
 import importlib.util
 import os
-from typing import List, Optional
+from typing import List, Optional, TYPE_CHECKING
 
 try:  # OpenAI is optional for deterministic offline runs.
     from openai import OpenAI
@@ -12,6 +12,16 @@ except Exception:  # pragma: no cover - fallback when SDK is unavailable.
 
 from .knowledge import KnowledgeBase
 from .memory import AgentMemory
+
+if TYPE_CHECKING:  # pragma: no cover
+    from .banking import Bank
+
+
+@dataclasses.dataclass
+class LLMConfig:
+    api_key: str | None = None
+    base_url: str | None = None
+    model: str = "gpt-4o"
 
 
 @dataclasses.dataclass
@@ -31,28 +41,38 @@ class ReasoningEngine:
     knowledge base context.
     """
 
-    def __init__(self, model_name: str = "gpt-4o") -> None:
+    def __init__(
+        self,
+        model_name: str = "gpt-4o",
+        api_key: str | None = None,
+        base_url: str | None = None,
+    ) -> None:
         self.model_name = model_name
-        self.api_key = os.getenv("OPENAI_API_KEY", "")
-        self.api_base = os.getenv("OPENAI_API_BASE") or os.getenv("OPENAI_BASE_URL")
+        self.api_key = api_key or os.getenv("OPENAI_API_KEY", "")
+        self.api_base = base_url or os.getenv("OPENAI_API_BASE") or os.getenv("OPENAI_BASE_URL")
+
+    @classmethod
+    def from_config(cls, cfg: LLMConfig | None = None) -> "ReasoningEngine":
+        cfg = cfg or LLMConfig()
+        return cls(model_name=cfg.model, api_key=cfg.api_key, base_url=cfg.base_url)
 
     def _llm_reason(self, prompt: str) -> Optional[str]:
         if not self.api_key or OpenAI is None:
             return None
         client = OpenAI(api_key=self.api_key, base_url=self.api_base)
         try:
-            response = client.chat.completions.create(
+            completion = client.chat.completions.create(
                 model=self.model_name,
                 messages=[
                     {"role": "system", "content": "You are an AML reasoning assistant."},
                     {"role": "user", "content": prompt},
                 ],
-                temperature=0.2,
-                max_tokens=240,
+                temperature=0.0,
+                max_tokens=4029,
             )
         except Exception:
             return None
-        return response.choices[0].message.content if response.choices else None
+        return completion.choices[0].message.content if completion.choices else None
 
     def _fallback_reason(self, role: str, query: str, context: str) -> str:
         summary_lines = [
@@ -269,6 +289,16 @@ class EmployeeAgent(Agent):
         return self.decide_next_action(
             "Serve customers and record legitimate revenue",
             observation=f"Completed shift at {business}",
+        )
+
+
+class BankAgent(Agent):
+    bank: "Bank"
+
+    def review_policy(self, notice: str) -> str:
+        return self.decide_next_action(
+            "Update institutional controls and AML monitoring",
+            observation=f"Policy notice: {notice}",
         )
 
 

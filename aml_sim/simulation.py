@@ -9,13 +9,16 @@ from .agents import (
     AccountProfile,
     AccountantAgent,
     BackOfficeAgent,
+    BankAgent,
     BankTellerAgent,
     BossAgent,
     BusinessOwnerAgent,
     CourierAgent,
     EmployeeAgent,
+    LLMConfig,
     MastermindAgent,
     MuleAgent,
+    ReasoningEngine,
     RegulatorAgent,
     ResidentAgent,
 )
@@ -75,6 +78,11 @@ class Simulation:
         )
         self.risk_model = RiskModel(config.risk_threshold, config.risk_model)
         self.policy_directives: List[str] = []
+        self.llm_config = LLMConfig(
+            api_key=config.llm_api_key,
+            base_url=config.llm_base_url,
+            model=config.llm_model,
+        )
         self.affect_config = config.affect_config or {}
         self.calibration = config.calibration or {}
         self.evaluation = config.evaluation or {}
@@ -91,6 +99,7 @@ class Simulation:
         self.daily_summaries: Dict[int, Dict[str, object]] = {}
         self.current_day_index: int = 0
 
+        self.bank_agents: List[BankAgent] = self._create_bank_agents()
         self.boss: BossAgent = self._create_boss()
         self.mastermind: MastermindAgent = self._create_mastermind()
         self.courier: CourierAgent = self._create_courier()
@@ -115,6 +124,9 @@ class Simulation:
 
     def _memory(self, max_items: int = 500) -> AgentMemory:
         return AgentMemory(max_items=max_items, embedder=self.embedder)
+
+    def _make_reasoner(self) -> ReasoningEngine:
+        return ReasoningEngine.from_config(self.llm_config)
 
     def _affect_for_role(self, role_key: str) -> Dict[str, Any]:
         """Return initial affective state for a role with safe defaults."""
@@ -232,12 +244,19 @@ class Simulation:
         currency = self.default_currency if self.default_currency in bank.supported_currencies else bank.supported_currencies[0]
         return bank.bank_id, currency
 
-    def _register_account(self, account_id: str, clean_balance: float = 0.0, illicit_balance: float = 0.0) -> AccountProfile:
-        bank_id, currency = self._choose_bank_and_currency()
+    def _register_account(
+        self,
+        account_id: str,
+        clean_balance: float = 0.0,
+        illicit_balance: float = 0.0,
+        bank_id: str | None = None,
+        currency: str | None = None,
+    ) -> AccountProfile:
+        chosen_bank_id, chosen_currency = self._choose_bank_and_currency()
         state = self.event_recorder.register_account(
             account_id=account_id,
-            bank_id=bank_id,
-            currency=currency,
+            bank_id=bank_id or chosen_bank_id,
+            currency=currency or chosen_currency,
             clean_balance=clean_balance,
             illicit_balance=illicit_balance,
         )
@@ -251,10 +270,37 @@ class Simulation:
 
     def _base_agent(self, idx: int, role: str):
         account = self._register_account(f"{role}-{idx}-acct", clean_balance=10000)
-        return self._memory(), [account]
+        return self._memory(), [account], self._make_reasoner()
+
+    def _create_bank_agents(self) -> List[BankAgent]:
+        agents: List[BankAgent] = []
+        for bank in self.banks.values():
+            account = self._register_account(
+                f"bank-{bank.bank_id}-treasury",
+                clean_balance=500000,
+                bank_id=bank.bank_id,
+                currency=bank.supported_currencies[0] if bank.supported_currencies else self.default_currency,
+            )
+            affect = self._affect_for_role("bank")
+            bank_agent = BankAgent(
+                f"bank-{bank.bank_id}",
+                bank.name,
+                [account],
+                self._memory(),
+                self.knowledge_base,
+                self._make_reasoner(),
+                mood=affect.get("mood", "calm"),
+                risk_tolerance=float(affect.get("risk_tolerance", 0.35)),
+                fatigue=float(affect.get("fatigue", 0.05)),
+                stress=float(affect.get("stress", 0.15)),
+                confidence=float(affect.get("confidence", 0.65)),
+            )
+            setattr(bank_agent, "bank", bank)
+            agents.append(bank_agent)
+        return agents
 
     def _create_boss(self) -> BossAgent:
-        mem, accounts = self._base_agent(1, "boss")
+        mem, accounts, reasoner = self._base_agent(1, "boss")
         affect = self._affect_for_role("boss")
         return BossAgent(
             "boss-1",
@@ -262,6 +308,7 @@ class Simulation:
             accounts,
             mem,
             self.knowledge_base,
+            reasoner,
             mood=affect["mood"],
             risk_tolerance=affect["risk_tolerance"],
             fatigue=affect["fatigue"],
@@ -270,7 +317,7 @@ class Simulation:
         )
 
     def _create_mastermind(self) -> MastermindAgent:
-        mem, accounts = self._base_agent(1, "mastermind")
+        mem, accounts, reasoner = self._base_agent(1, "mastermind")
         affect = self._affect_for_role("mastermind")
         return MastermindAgent(
             "mastermind-1",
@@ -278,6 +325,7 @@ class Simulation:
             accounts,
             mem,
             self.knowledge_base,
+            reasoner,
             mood=affect["mood"],
             risk_tolerance=affect["risk_tolerance"],
             fatigue=affect["fatigue"],
@@ -286,7 +334,7 @@ class Simulation:
         )
 
     def _create_courier(self) -> CourierAgent:
-        mem, accounts = self._base_agent(1, "courier")
+        mem, accounts, reasoner = self._base_agent(1, "courier")
         affect = self._affect_for_role("courier")
         return CourierAgent(
             "courier-1",
@@ -294,6 +342,7 @@ class Simulation:
             accounts,
             mem,
             self.knowledge_base,
+            reasoner,
             mood=affect["mood"],
             risk_tolerance=affect["risk_tolerance"],
             fatigue=affect["fatigue"],
@@ -305,7 +354,7 @@ class Simulation:
         owners = []
         business_names = ["restaurant", "car_shop", "e_shop"]
         for idx, btype in enumerate(business_names, 1):
-            mem, accounts = self._base_agent(idx, f"owner-{btype}")
+            mem, accounts, reasoner = self._base_agent(idx, f"owner-{btype}")
             affect = self._affect_for_role("business_owner")
             owner = BusinessOwnerAgent(
                 f"owner-{idx}",
@@ -313,6 +362,7 @@ class Simulation:
                 accounts,
                 mem,
                 self.knowledge_base,
+                reasoner,
                 mood=affect["mood"],
                 risk_tolerance=affect["risk_tolerance"],
                 fatigue=affect["fatigue"],
@@ -326,7 +376,7 @@ class Simulation:
     def _create_accountants(self) -> List[AccountantAgent]:
         accountants = []
         for idx in range(1, 4):
-            mem, accounts = self._base_agent(idx, "accountant")
+            mem, accounts, reasoner = self._base_agent(idx, "accountant")
             affect = self._affect_for_role("accountant")
             accountants.append(
                 AccountantAgent(
@@ -335,6 +385,7 @@ class Simulation:
                     accounts,
                     mem,
                     self.knowledge_base,
+                    reasoner,
                     mood=affect["mood"],
                     risk_tolerance=affect["risk_tolerance"],
                     fatigue=affect["fatigue"],
@@ -347,7 +398,7 @@ class Simulation:
     def _create_employees(self) -> List[EmployeeAgent]:
         employees: List[EmployeeAgent] = []
         for idx in range(1, self._scale_count(self.config.num_employees) + 1):
-            mem, accounts = self._base_agent(idx, "employee")
+            mem, accounts, reasoner = self._base_agent(idx, "employee")
             affect = self._affect_for_role("employee")
             employees.append(
                 EmployeeAgent(
@@ -356,6 +407,7 @@ class Simulation:
                     accounts,
                     mem,
                     self.knowledge_base,
+                    reasoner,
                     mood=affect["mood"],
                     risk_tolerance=affect["risk_tolerance"],
                     fatigue=affect["fatigue"],
@@ -378,6 +430,7 @@ class Simulation:
                     [self._register_account(acc) for acc in accounts],
                     mem,
                     self.knowledge_base,
+                    self._make_reasoner(),
                     mood=affect["mood"],
                     risk_tolerance=affect["risk_tolerance"],
                     fatigue=affect["fatigue"],
@@ -390,7 +443,7 @@ class Simulation:
     def _create_residents(self) -> List[ResidentAgent]:
         residents = []
         for idx in range(1, self._scale_count(self.config.num_residents) + 1):
-            mem, accounts = self._base_agent(idx, "resident")
+            mem, accounts, reasoner = self._base_agent(idx, "resident")
             affect = self._affect_for_role("resident")
             residents.append(
                 ResidentAgent(
@@ -399,6 +452,7 @@ class Simulation:
                     accounts,
                     mem,
                     self.knowledge_base,
+                    reasoner,
                     mood=affect["mood"],
                     risk_tolerance=affect["risk_tolerance"],
                     fatigue=affect["fatigue"],
@@ -411,7 +465,7 @@ class Simulation:
     def _create_tellers(self) -> List[BankTellerAgent]:
         tellers = []
         for idx in range(1, 3):
-            mem, accounts = self._base_agent(idx, "teller")
+            mem, accounts, reasoner = self._base_agent(idx, "teller")
             affect = self._affect_for_role("bank_teller")
             tellers.append(
                 BankTellerAgent(
@@ -420,6 +474,7 @@ class Simulation:
                     accounts,
                     mem,
                     self.knowledge_base,
+                    reasoner,
                     mood=affect["mood"],
                     risk_tolerance=affect["risk_tolerance"],
                     fatigue=affect["fatigue"],
@@ -430,7 +485,7 @@ class Simulation:
         return tellers
 
     def _create_back_office(self) -> BackOfficeAgent:
-        mem, accounts = self._base_agent(1, "back-office")
+        mem, accounts, reasoner = self._base_agent(1, "back-office")
         affect = self._affect_for_role("back_office")
         return BackOfficeAgent(
             "back-office-1",
@@ -438,6 +493,7 @@ class Simulation:
             accounts,
             mem,
             self.knowledge_base,
+            reasoner,
             mood=affect["mood"],
             risk_tolerance=affect["risk_tolerance"],
             fatigue=affect["fatigue"],
@@ -448,7 +504,7 @@ class Simulation:
     def _create_regulators(self) -> List[RegulatorAgent]:
         regulators = []
         for idx in range(1, self._scale_count(self.config.num_regulators) + 1):
-            mem, accounts = self._base_agent(idx, "regulator")
+            mem, accounts, reasoner = self._base_agent(idx, "regulator")
             affect = self._affect_for_role("regulator")
             regulators.append(
                 RegulatorAgent(
@@ -457,6 +513,7 @@ class Simulation:
                     accounts,
                     mem,
                     self.knowledge_base,
+                    reasoner,
                     mood=affect["mood"],
                     risk_tolerance=affect["risk_tolerance"],
                     fatigue=affect["fatigue"],
@@ -542,7 +599,8 @@ class Simulation:
     @property
     def all_agents(self):
         return (
-            [self.boss, self.mastermind, self.courier, self.back_office]
+            self.bank_agents
+            + [self.boss, self.mastermind, self.courier, self.back_office]
             + self.accountants
             + self.business_owners
             + self.employees
