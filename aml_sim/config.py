@@ -32,6 +32,9 @@ class SimulationConfig:
     knowledge_documents: List[Dict[str, str]]
     knowledge_model_path: str
     knowledge_device: str | None
+    llm_api_key: str | None
+    llm_base_url: str | None
+    llm_model: str
     risk_model: Dict[str, Any]
     default_currency: str
     pattern_generation: Dict[str, Any]
@@ -55,6 +58,7 @@ def _load_raw_config(path: str | Path) -> Dict[str, Any]:
 def load_config(path: str | Path) -> SimulationConfig:
     raw = _load_raw_config(path)
     knowledge_cfg = raw.get("knowledge", {})
+    llm_cfg = raw.get("llm", {})
     scenario = raw.get("scenario", "LI")
     default_presets = {
         "HI": {"population_scale": 3.0, "transaction_scale": 4.0, "laundering_intensity": 0.08},
@@ -90,6 +94,9 @@ def load_config(path: str | Path) -> SimulationConfig:
         knowledge_documents=knowledge_cfg.get("documents", []),
         knowledge_model_path=knowledge_cfg.get("model_path", "facebook/dpr-ctx_encoder-single-nq-base"),
         knowledge_device=knowledge_cfg.get("device"),
+        llm_api_key=llm_cfg.get("api_key"),
+        llm_base_url=llm_cfg.get("base_url"),
+        llm_model=llm_cfg.get("model", "gpt-4o"),
         risk_model=raw.get("risk_model", {}),
         default_currency=raw.get("default_currency", "CNY"),
         pattern_generation=raw.get("pattern_generation", {"enabled": True, "per_day": 1, "base_amount": 120000}),

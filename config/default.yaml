@@ -34,6 +34,11 @@
     "per_day": 2,
     "base_amount": 150000
   },
+  "llm": {
+    "api_key": "",
+    "base_url": "https://api.openai.com/v1",
+    "model": "gpt-4o-mini"
+  },
   "role_descriptions": {
     "boss": "Directs laundering strategy and communicates indirectly with the mastermind.",
     "mastermind": "Receives criminal funds and parcels them to collaborators.",
