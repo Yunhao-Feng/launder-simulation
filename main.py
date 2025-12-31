@@ -18,16 +18,9 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     args = parse_args()
     config = load_config(args.config)
-    simulation = Simulation(config)
-    simulation.run()
-
     output_dir = ensure_output_dir(args.output)
-    simulation.event_recorder.export_logs(output_dir / "behaviour_log.csv")
-    simulation.event_recorder.export_transactions(output_dir / "transactions.csv")
-    export.export_accounts(simulation, output_dir / "accounts.csv")
-    export.export_entities(simulation, output_dir / "entities.csv")
-    export.export_edges(simulation, output_dir / "graph_edges.csv")
-    export.export_graph_features(simulation, output_dir / "graph_features.csv")
+    simulation = Simulation(config)
+    simulation.run(output_dir)
     print(f"Simulation complete. Logs at {output_dir}")
 
 

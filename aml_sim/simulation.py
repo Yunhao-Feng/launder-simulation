@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import random
 from datetime import datetime, timedelta
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from .agents import (
@@ -29,7 +30,7 @@ from .entities import Company, Person
 from .knowledge import DPRTextEmbedder, KnowledgeBase
 from .memory import AgentMemory, EventRecorder
 from .social import diffuse_information, generate_recruitment_event, generate_social_event, update_relationship
-from . import interface, monitor
+from . import export, interface, monitor
 from .patterns import (
     ALL_LAUNDERING_PATTERNS,
     BIPARTITE,
@@ -82,6 +83,7 @@ class Simulation:
             api_key=config.llm_api_key,
             base_url=config.llm_base_url,
             model=config.llm_model,
+            max_tokens=config.llm_max_tokens,
         )
         self.affect_config = config.affect_config or {}
         self.calibration = config.calibration or {}
@@ -98,6 +100,7 @@ class Simulation:
         self.daily_affect_snapshots: Dict[int, Dict[str, Dict[str, Dict[str, float] | str]]] = {}
         self.daily_summaries: Dict[int, Dict[str, object]] = {}
         self.current_day_index: int = 0
+        self.output_dir: Optional[Path] = None
 
         self.bank_agents: List[BankAgent] = self._create_bank_agents()
         self.boss: BossAgent = self._create_boss()
@@ -699,11 +702,28 @@ class Simulation:
         self.daily_transaction_ids.setdefault(day_key, []).append(tx.tx_id)
         return tx
     
-    def run(self) -> None:
+    def export_outputs(self, output_dir: Path) -> None:
+        output_dir.mkdir(parents=True, exist_ok=True)
+        self.event_recorder.export_logs(output_dir / "behaviour_log.csv")
+        self.event_recorder.export_transactions(output_dir / "transactions.csv")
+        export.export_accounts(self, output_dir / "accounts.csv")
+        export.export_entities(self, output_dir / "entities.csv")
+        export.export_edges(self, output_dir / "graph_edges.csv")
+        export.export_graph_features(self, output_dir / "graph_features.csv")
+
+    def run(self, output_dir: Optional[Path | str] = None) -> None:
         start_date = datetime(2024, 1, 1)
+        if output_dir is not None:
+            self.output_dir = Path(output_dir)
+        if self.output_dir:
+            self.output_dir.mkdir(parents=True, exist_ok=True)
         for day_idx in range(self.config.simulation_days):
             current_date = start_date + timedelta(days=day_idx)
             self._run_day(current_date, day_idx)
+            if self.output_dir:
+                self.export_outputs(self.output_dir)
+        if self.output_dir:
+            self.export_outputs(self.output_dir)
 
     def send_user_message(self, agent_id: str, text: str, user_role: str | None = None) -> str:
         """Route a user-authored message to a specific agent."""
