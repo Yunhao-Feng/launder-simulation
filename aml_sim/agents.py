@@ -22,6 +22,7 @@ class LLMConfig:
     api_key: str | None = None
     base_url: str | None = None
     model: str = "gpt-4o"
+    max_tokens: int = 1024
 
 
 @dataclasses.dataclass
@@ -46,15 +47,22 @@ class ReasoningEngine:
         model_name: str = "gpt-4o",
         api_key: str | None = None,
         base_url: str | None = None,
+        max_tokens: int = 1024,
     ) -> None:
         self.model_name = model_name
         self.api_key = api_key or os.getenv("OPENAI_API_KEY", "")
         self.api_base = base_url or os.getenv("OPENAI_API_BASE") or os.getenv("OPENAI_BASE_URL")
+        self.max_tokens = max_tokens
 
     @classmethod
     def from_config(cls, cfg: LLMConfig | None = None) -> "ReasoningEngine":
         cfg = cfg or LLMConfig()
-        return cls(model_name=cfg.model, api_key=cfg.api_key, base_url=cfg.base_url)
+        return cls(
+            model_name=cfg.model,
+            api_key=cfg.api_key,
+            base_url=cfg.base_url,
+            max_tokens=cfg.max_tokens,
+        )
 
     def _llm_reason(self, prompt: str) -> Optional[str]:
         if not self.api_key or OpenAI is None:
@@ -68,7 +76,7 @@ class ReasoningEngine:
                     {"role": "user", "content": prompt},
                 ],
                 temperature=0.0,
-                max_tokens=4029,
+                max_tokens=self.max_tokens,
             )
         except Exception:
             return None

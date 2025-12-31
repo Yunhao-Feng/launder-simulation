@@ -35,6 +35,7 @@ class SimulationConfig:
     llm_api_key: str | None
     llm_base_url: str | None
     llm_model: str
+    llm_max_tokens: int
     risk_model: Dict[str, Any]
     default_currency: str
     pattern_generation: Dict[str, Any]
@@ -97,6 +98,7 @@ def load_config(path: str | Path) -> SimulationConfig:
         llm_api_key=llm_cfg.get("api_key"),
         llm_base_url=llm_cfg.get("base_url"),
         llm_model=llm_cfg.get("model", "gpt-4o"),
+        llm_max_tokens=int(llm_cfg.get("max_tokens", 1024)),
         risk_model=raw.get("risk_model", {}),
         default_currency=raw.get("default_currency", "CNY"),
         pattern_generation=raw.get("pattern_generation", {"enabled": True, "per_day": 1, "base_amount": 120000}),
